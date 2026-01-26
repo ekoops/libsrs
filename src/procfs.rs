@@ -1,5 +1,5 @@
 use crate::task::{Comm, OsPath};
-use std::ffi::{CString, NulError, OsStr, OsString};
+use std::ffi::{CStr, CString, NulError, OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Cursor, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -104,6 +104,19 @@ impl Procfs {
             Ok(read_bytes)
         })
     }
+
+    /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/exe` for `pid`.
+    pub fn read_exe(&self, pid: u32) -> io::Result<OsPath> {
+        let mut path_buff = Self::new_path_buff();
+        let mut cursor = Cursor::new(&mut path_buff[..]);
+        self.write_mount_path_and_pid(&mut cursor, pid)?;
+        cursor.write_all(b"/exe")?;
+        let path = CStr::from_bytes_until_nul(&path_buff)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        OsPath::from_writer(|buff| -> io::Result<usize> {
+            return crate::read::readlink(path, buff);
+        })
+    }
 }
 
 #[cfg(test)]
@@ -120,5 +133,12 @@ mod test {
         let procfs = procfs();
         let pid = std::process::id();
         let _comm = procfs.read_comm(pid).unwrap();
+    }
+
+    #[test]
+    fn read_exe() {
+        let procfs = procfs();
+        let pid = std::process::id();
+        let _exe = procfs.read_exe(pid).unwrap();
     }
 }
