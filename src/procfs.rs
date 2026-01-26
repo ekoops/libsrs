@@ -105,12 +105,13 @@ impl Procfs {
         })
     }
 
-    /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/exe` for `pid`.
-    pub fn read_exe(&self, pid: u32) -> io::Result<OsPath> {
+    /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`,
+    /// where `filename_bytes` is the binary string representation of `<filename>`.
+    fn read_symlink(&self, pid: u32, filename_bytes: &[u8]) -> io::Result<OsPath> {
         let mut path_buff = Self::new_path_buff();
         let mut cursor = Cursor::new(&mut path_buff[..]);
         self.write_mount_path_and_pid(&mut cursor, pid)?;
-        cursor.write_all(b"/exe")?;
+        cursor.write_all(filename_bytes)?;
         let path = CStr::from_bytes_until_nul(&path_buff)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         OsPath::from_writer(|buff| -> io::Result<usize> {
@@ -118,17 +119,19 @@ impl Procfs {
         })
     }
 
+    /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/exe` for `pid`.
+    pub fn read_exe(&self, pid: u32) -> io::Result<OsPath> {
+        self.read_symlink(pid, b"/exe")
+    }
+
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/cwd` for `pid`.
     pub fn read_cwd(&self, pid: u32) -> io::Result<OsPath> {
-        let mut path_buff = Self::new_path_buff();
-        let mut cursor = Cursor::new(&mut path_buff[..]);
-        self.write_mount_path_and_pid(&mut cursor, pid)?;
-        cursor.write_all(b"/cwd")?;
-        let path = CStr::from_bytes_until_nul(&path_buff)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        OsPath::from_writer(|buff| -> io::Result<usize> {
-            return crate::read::readlink(path, buff);
-        })
+        self.read_symlink(pid, b"/cwd")
+    }
+
+    /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/root` for `pid`.
+    pub fn read_root(&self, pid: u32) -> io::Result<OsPath> {
+        self.read_symlink(pid, b"/root")
     }
 }
 
@@ -160,5 +163,12 @@ mod test {
         let procfs = procfs();
         let pid = std::process::id();
         let _cwd = procfs.read_cwd(pid).unwrap();
+    }
+
+    #[test]
+    fn read_root() {
+        let procfs = procfs();
+        let pid = std::process::id();
+        let _root = procfs.read_root(pid).unwrap();
     }
 }
