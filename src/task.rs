@@ -1,6 +1,8 @@
 use std::ffi::OsStr;
 use std::io;
+use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 
 const TASK_COMM_LEN: usize = 16;
 
@@ -12,11 +14,11 @@ pub struct Comm([u8; TASK_COMM_LEN]);
 impl Comm {
     pub fn from_writer<F: FnOnce(&mut [u8]) -> io::Result<usize>>(writer: F) -> io::Result<Self> {
         let mut comm = Self::default();
-        let buff_to_write = &mut comm.0[1..];
-        let written_bytes = writer(buff_to_write)?;
-        // Cap the written bytes to be sure it is not bigger than size of the buffer.
-        let written_bytes  = std::cmp::min(written_bytes, buff_to_write.len());
-        comm.0[0] = written_bytes as u8;
+        let buff = &mut comm.0[1..];
+        let written_bytes = writer(buff)?;
+        // Cap written bytes to be sure it is not bigger than buffer size.
+        let capped_written_bytes = std::cmp::min(written_bytes, buff.len());
+        comm.0[0] = capped_written_bytes as u8;
         Ok(comm)
     }
 
@@ -26,8 +28,40 @@ impl Comm {
     }
 }
 
+/// A wrapper around [PathBuf] representing a path with a max length of [OsPath::MAX_LEN].
+#[derive(Clone, Default)]
+pub struct OsPath(PathBuf);
+
+impl OsPath {
+    /// Max path length.
+    const MAX_LEN: usize = 4096;
+
+    /// Create an [OsPath] from
+    pub fn from_writer<F: FnOnce(&mut [u8]) -> io::Result<usize>>(writer: F) -> io::Result<Self> {
+        let mut buff = [0u8; Self::MAX_LEN];
+        let written_bytes = writer(&mut buff)?;
+        // Cap written bytes to be sure it is not bigger than buffer size.
+        let written_bytes = std::cmp::min(written_bytes, buff.len());
+        let os_str = OsStr::from_bytes(&buff[..written_bytes]);
+        Ok(Self(PathBuf::from(os_str)))
+    }
+
+    pub fn as_os_str(&self) -> &OsStr {
+        self.0.as_os_str()
+    }
+}
+
+impl Deref for OsPath {
+    type Target = PathBuf;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Represent a Linux task.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct Task {
     _comm: Comm,
+    _exe: OsPath,
 }
