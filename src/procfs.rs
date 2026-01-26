@@ -117,6 +117,19 @@ impl Procfs {
             return crate::read::readlink(path, buff);
         })
     }
+
+    /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/cwd` for `pid`.
+    pub fn read_cwd(&self, pid: u32) -> io::Result<OsPath> {
+        let mut path_buff = Self::new_path_buff();
+        let mut cursor = Cursor::new(&mut path_buff[..]);
+        self.write_mount_path_and_pid(&mut cursor, pid)?;
+        cursor.write_all(b"/cwd")?;
+        let path = CStr::from_bytes_until_nul(&path_buff)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        OsPath::from_writer(|buff| -> io::Result<usize> {
+            return crate::read::readlink(path, buff);
+        })
+    }
 }
 
 #[cfg(test)]
@@ -140,5 +153,12 @@ mod test {
         let procfs = procfs();
         let pid = std::process::id();
         let _exe = procfs.read_exe(pid).unwrap();
+    }
+
+    #[test]
+    fn read_cwd() {
+        let procfs = procfs();
+        let pid = std::process::id();
+        let _cwd = procfs.read_cwd(pid).unwrap();
     }
 }
