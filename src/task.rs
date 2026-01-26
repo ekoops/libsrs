@@ -73,4 +73,7 @@ impl Deref for OsPath {
 pub struct Task {
     _comm: Comm,
     _exe: OsPath,
+    _cwd: OsPath,
+    _root: OsPath,
+    _loginuid: i32,
 }

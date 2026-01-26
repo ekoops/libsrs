@@ -81,21 +81,33 @@ impl Procfs {
     }
 
     /// Write the mount path and `pid` into `cursor`, separating them with a `/`.
-    fn write_mount_path_and_pid(&self, cursor: &mut Cursor<&mut [u8]>, pid: u32) -> io::Result<()> {
+    fn write_proc_file_path(
+        &self,
+        cursor: &mut Cursor<&mut [u8]>,
+        pid: u32,
+        filename_bytes: &[u8],
+    ) -> io::Result<()> {
         self.write_mount_path(cursor)?;
         cursor.write_all(b"/")?;
-        Self::write_pid(cursor, pid)
+        Self::write_pid(cursor, pid)?;
+        cursor.write_all(b"/")?;
+        cursor.write_all(filename_bytes)
+    }
+
+    /// Open the file at `<procfs_mount_path>/<pid>/<filename>` for `pid`, where `filename` is the
+    /// binary string representation of `<filename>`.
+    fn open_proc_file(&self, pid: u32, filename: &[u8]) -> io::Result<File> {
+        let mut path_buff = Self::new_path_buff();
+        let mut cursor = Cursor::new(&mut path_buff[..]);
+        self.write_proc_file_path(&mut cursor, pid, filename)?;
+        let written_bytes = cursor.position() as usize;
+        let path = OsStr::from_bytes(&path_buff[..written_bytes]);
+        File::open(path)
     }
 
     /// Return the content read from `<procfs_mount_path>/<pid>/comm` for `pid`.
     pub fn read_comm(&self, pid: u32) -> io::Result<Comm> {
-        let mut path_buff = Self::new_path_buff();
-        let mut cursor = Cursor::new(&mut path_buff[..]);
-        self.write_mount_path_and_pid(&mut cursor, pid)?;
-        cursor.write_all(b"/comm")?;
-        let written_bytes = cursor.position() as usize;
-        let path = OsStr::from_bytes(&path_buff[..written_bytes]);
-        let mut file = File::open(path)?;
+        let mut file = self.open_proc_file(pid, b"comm")?;
         Comm::from_writer(|buff| -> io::Result<usize> {
             let mut read_bytes = crate::read::read_exact(&mut file, buff)?;
             if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
@@ -105,13 +117,24 @@ impl Procfs {
         })
     }
 
+    /// Return the content read from `<procfs_mount_path>/<pid>/loginuid` for `pid`.
+    pub fn read_loginuid(&self, pid: u32) -> io::Result<u32> {
+        let mut file = self.open_proc_file(pid, b"loginuid")?;
+        let mut buff = [0u8; 16];
+        let mut read_bytes = crate::read::read_exact(&mut file, &mut buff)?;
+        if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
+            read_bytes -= 1;
+        }
+        btoi::btoi::<u32>(&buff[..read_bytes])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`,
-    /// where `filename_bytes` is the binary string representation of `<filename>`.
-    fn read_symlink(&self, pid: u32, filename_bytes: &[u8]) -> io::Result<OsPath> {
+    /// where `filename` is the binary string representation of `<filename>`.
+    fn read_symlink(&self, pid: u32, filename: &[u8]) -> io::Result<OsPath> {
         let mut path_buff = Self::new_path_buff();
         let mut cursor = Cursor::new(&mut path_buff[..]);
-        self.write_mount_path_and_pid(&mut cursor, pid)?;
-        cursor.write_all(filename_bytes)?;
+        self.write_proc_file_path(&mut cursor, pid, filename)?;
         let path = CStr::from_bytes_until_nul(&path_buff)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         OsPath::from_writer(|buff| -> io::Result<usize> {
@@ -121,17 +144,17 @@ impl Procfs {
 
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/exe` for `pid`.
     pub fn read_exe(&self, pid: u32) -> io::Result<OsPath> {
-        self.read_symlink(pid, b"/exe")
+        self.read_symlink(pid, b"exe")
     }
 
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/cwd` for `pid`.
     pub fn read_cwd(&self, pid: u32) -> io::Result<OsPath> {
-        self.read_symlink(pid, b"/cwd")
+        self.read_symlink(pid, b"cwd")
     }
 
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/root` for `pid`.
     pub fn read_root(&self, pid: u32) -> io::Result<OsPath> {
-        self.read_symlink(pid, b"/root")
+        self.read_symlink(pid, b"root")
     }
 }
 
@@ -170,5 +193,13 @@ mod test {
         let procfs = procfs();
         let pid = std::process::id();
         let _root = procfs.read_root(pid).unwrap();
+    }
+
+    #[test]
+    fn read_loginuid() {
+        let procfs = procfs();
+        let pid = std::process::id();
+        let _loginuid = procfs.read_loginuid(pid).unwrap() as i32;
+        println!("{}", _loginuid);
     }
 }
