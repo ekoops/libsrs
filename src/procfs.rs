@@ -1,4 +1,4 @@
-use crate::task::{Comm, OsPath};
+use crate::task::{Comm, Environ, OsPath};
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Cursor, Write};
@@ -114,6 +114,14 @@ impl Procfs {
                 read_bytes -= 1;
             }
             Ok(read_bytes)
+        })
+    }
+
+    /// Return the content read from `<procfs_mount_path>/<pid>/environ` for `pid`.
+    pub fn read_environ(&self, pid: u32) -> io::Result<Environ> {
+        let mut file = self.open_proc_file(pid, b"environ")?;
+        Environ::from_writer(|buff| -> io::Result<usize> {
+            crate::read::read_exact(&mut file, buff)
         })
     }
 

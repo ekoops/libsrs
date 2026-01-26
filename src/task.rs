@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
@@ -68,6 +68,42 @@ impl Deref for OsPath {
     }
 }
 
+/// A wrapper around [OsString] representing the environ content for a process with a max length of
+/// [Environ::MAX_LEN].
+#[derive(Clone, Default)]
+pub struct Environ(OsString);
+
+impl Environ {
+    /// Max environ length.
+    const MAX_LEN: usize = 4096;
+
+    /// Create an [Environ] by providing a scratch buffer to `writer`. `writer` must return the
+    /// amount of bytes written into the received buffer.
+    pub fn from_writer<F>(writer: F) -> io::Result<Self>
+    where
+        F: FnOnce(&mut [u8]) -> io::Result<usize>,
+    {
+        let mut buff = [0u8; Self::MAX_LEN];
+        let written_bytes = writer(&mut buff)?;
+        // Cap written bytes to be sure it is not bigger than buffer size.
+        let written_bytes = std::cmp::min(written_bytes, buff.len());
+        let os_str = OsStr::from_bytes(&buff[..written_bytes]);
+        Ok(Self(OsString::from(os_str)))
+    }
+
+    pub fn as_os_str(&self) -> &OsStr {
+        self.0.as_os_str()
+    }
+}
+
+impl Deref for Environ {
+    type Target = OsString;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Represent a Linux task.
 #[derive(Clone)]
 pub struct Task {
@@ -75,5 +111,6 @@ pub struct Task {
     _exe: OsPath,
     _cwd: OsPath,
     _root: OsPath,
+    _environ: Environ,
     _loginuid: i32,
 }
