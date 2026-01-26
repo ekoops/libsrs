@@ -12,7 +12,12 @@ const TASK_COMM_LEN: usize = 16;
 pub struct Comm([u8; TASK_COMM_LEN]);
 
 impl Comm {
-    pub fn from_writer<F: FnOnce(&mut [u8]) -> io::Result<usize>>(writer: F) -> io::Result<Self> {
+    /// Create a [Comm] by providing a scratch buffer to `writer`. `writer` must return the amount
+    /// of bytes written into the received buffer.
+    pub fn from_writer<F>(writer: F) -> io::Result<Self>
+    where
+        F: FnOnce(&mut [u8]) -> io::Result<usize>,
+    {
         let mut comm = Self::default();
         let buff = &mut comm.0[1..];
         let written_bytes = writer(buff)?;
@@ -36,8 +41,12 @@ impl OsPath {
     /// Max path length.
     const MAX_LEN: usize = 4096;
 
-    /// Create an [OsPath] from
-    pub fn from_writer<F: FnOnce(&mut [u8]) -> io::Result<usize>>(writer: F) -> io::Result<Self> {
+    /// Create an [OsPath] by providing a scratch buffer to `writer`. `writer` must return the
+    /// amount of bytes written into the received buffer.
+    pub fn from_writer<F>(writer: F) -> io::Result<Self>
+    where
+        F: FnOnce(&mut [u8]) -> io::Result<usize>,
+    {
         let mut buff = [0u8; Self::MAX_LEN];
         let written_bytes = writer(&mut buff)?;
         // Cap written bytes to be sure it is not bigger than buffer size.
