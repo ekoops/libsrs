@@ -1,3 +1,4 @@
+use crate::read::{read_exact, readlink};
 use crate::task::{Comm, Environ, OsPath};
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
 use std::fs::File;
@@ -109,7 +110,7 @@ impl Procfs {
     pub fn read_comm(&self, pid: u32) -> io::Result<Comm> {
         let mut file = self.open_proc_file(pid, b"comm")?;
         Comm::from_writer(|buff| -> io::Result<usize> {
-            let mut read_bytes = crate::read::read_exact(&mut file, buff)?;
+            let mut read_bytes = read_exact(&mut file, buff)?;
             if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
                 read_bytes -= 1;
             }
@@ -120,16 +121,14 @@ impl Procfs {
     /// Return the content read from `<procfs_mount_path>/<pid>/environ` for `pid`.
     pub fn read_environ(&self, pid: u32) -> io::Result<Environ> {
         let mut file = self.open_proc_file(pid, b"environ")?;
-        Environ::from_writer(|buff| -> io::Result<usize> {
-            crate::read::read_exact(&mut file, buff)
-        })
+        Environ::from_writer(|buff| -> io::Result<usize> { read_exact(&mut file, buff) })
     }
 
     /// Return the content read from `<procfs_mount_path>/<pid>/loginuid` for `pid`.
     pub fn read_loginuid(&self, pid: u32) -> io::Result<u32> {
         let mut file = self.open_proc_file(pid, b"loginuid")?;
         let mut buff = [0u8; 16];
-        let mut read_bytes = crate::read::read_exact(&mut file, &mut buff)?;
+        let mut read_bytes = read_exact(&mut file, &mut buff)?;
         if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
             read_bytes -= 1;
         }
@@ -145,9 +144,7 @@ impl Procfs {
         self.write_proc_file_path(&mut cursor, pid, filename)?;
         let path = CStr::from_bytes_until_nul(&path_buff)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        OsPath::from_writer(|buff| -> io::Result<usize> {
-            return crate::read::readlink(path, buff);
-        })
+        OsPath::from_writer(|buff| -> io::Result<usize> { readlink(path, buff) })
     }
 
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/exe` for `pid`.
@@ -208,6 +205,5 @@ mod test {
         let procfs = procfs();
         let pid = std::process::id();
         let _loginuid = procfs.read_loginuid(pid).unwrap() as i32;
-        println!("{}", _loginuid);
     }
 }
