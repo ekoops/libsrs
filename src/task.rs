@@ -86,6 +86,28 @@ impl Deref for Environ {
     }
 }
 
+const MAX_CMDLINE_LEN: usize = 4096;
+
+/// A wrapper around [CappedOsString<MAX_CMDLINE_LEN>] representing the cmdline content for a
+/// process.
+#[derive(Clone, Default)]
+pub struct Cmdline(CappedOsString<MAX_CMDLINE_LEN>);
+
+impl FromBufferWriter for Cmdline {
+    fn from_buffer_writer<W: BufferWriter>(writer: W) -> io::Result<Self> {
+        let capped_os_string = CappedOsString::from_buffer_writer(writer)?;
+        Ok(Self(capped_os_string))
+    }
+}
+
+impl Deref for Cmdline {
+    type Target = OsString;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Represent a Linux task.
 #[derive(Clone)]
 pub struct Task {
@@ -94,5 +116,6 @@ pub struct Task {
     _cwd: OsPath,
     _root: OsPath,
     _environ: Environ,
+    _cmdline: Cmdline,
     _loginuid: i32,
 }

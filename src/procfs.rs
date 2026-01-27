@@ -127,6 +127,14 @@ impl Procfs {
         })
     }
 
+    /// Return the content read from `<procfs_mount_path>/<pid>/cmdline` for `pid`.
+    pub fn read_cmdline(&self, pid: u32) -> io::Result<Environ> {
+        let mut file = self.open_proc_file(pid, b"cmdline")?;
+        Environ::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
+            read_exact(&mut file, buff)
+        })
+    }
+
     /// Return the content read from `<procfs_mount_path>/<pid>/loginuid` for `pid`.
     pub fn read_loginuid(&self, pid: u32) -> io::Result<u32> {
         let mut file = self.open_proc_file(pid, b"loginuid")?;
@@ -208,5 +216,12 @@ mod test {
         let procfs = procfs();
         let pid = std::process::id();
         let _loginuid = procfs.read_loginuid(pid).unwrap() as i32;
+    }
+
+    #[test]
+    fn read_cmdline() {
+        let procfs = procfs();
+        let pid = std::process::id();
+        let _cmdline = procfs.read_cmdline(pid).unwrap();
     }
 }
