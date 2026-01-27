@@ -54,23 +54,23 @@ impl Procfs {
     const MAX_PID_LEN: usize = 10;
     /// Max allowed length for a suffix after <mount_path>/<pid>/ (see [PATH_BUFF_SIZE]).
     const MAX_SUFFIX_LEN: usize = 32;
-    /// Safety margin accounting for '/'s and trailing zeros in procfs path (see [PATH_BUFF_SIZE]).
+    /// Safety margin accounting for `/`s and trailing zeros in procfs path (see [PATH_BUFF_SIZE]).
     const PADDING: usize = 16;
     /// The size of the buffer used to construct procfs file paths. The buffer content is structured
     /// in the following way: <mount_path>/<pid>/<suffix><zero_pad>.
     const PATH_BUFF_SIZE: usize =
         ProcfsMountPath::MAX_LEN + Self::MAX_PID_LEN + Self::MAX_SUFFIX_LEN + Self::PADDING;
 
-    /// Create a new path buffer.
+    /// Create a new path buffer that can be used to build a path.
     #[inline]
     fn new_path_buff() -> [u8; Self::PATH_BUFF_SIZE] {
         [0u8; Self::PATH_BUFF_SIZE]
     }
 
-    /// Write the mount path into the `cursor`.
+    /// Write the mount path into `cursor`.
     fn write_mount_path(&self, cursor: &mut Cursor<&mut [u8]>) -> io::Result<()> {
-        let prefix_bytes = self.mount_path.0.as_bytes();
-        cursor.write_all(prefix_bytes)
+        let mount_path = self.mount_path.0.as_bytes();
+        cursor.write_all(mount_path)
     }
 
     /// Write the string representation of `pid` into `cursor`.
@@ -80,18 +80,18 @@ impl Procfs {
         cursor.write_all(pid_str.as_bytes())
     }
 
-    /// Write the mount path and `pid` into `cursor`, separating them with a `/`.
+    /// Write the mount path, `pid` and `filename` into `cursor`, separating them with `/`s.
     fn write_proc_file_path(
         &self,
         cursor: &mut Cursor<&mut [u8]>,
         pid: u32,
-        filename_bytes: &[u8],
+        filename: &[u8],
     ) -> io::Result<()> {
         self.write_mount_path(cursor)?;
         cursor.write_all(b"/")?;
         Self::write_pid(cursor, pid)?;
         cursor.write_all(b"/")?;
-        cursor.write_all(filename_bytes)
+        cursor.write_all(filename)
     }
 
     /// Open the file at `<procfs_mount_path>/<pid>/<filename>` for `pid`, where `filename` is the
