@@ -1,3 +1,4 @@
+use crate::buffer_writer::FromBufferWriter;
 use crate::read::{read_exact, readlink};
 use crate::task::{Comm, Environ, OsPath};
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
@@ -109,7 +110,7 @@ impl Procfs {
     /// Return the content read from `<procfs_mount_path>/<pid>/comm` for `pid`.
     pub fn read_comm(&self, pid: u32) -> io::Result<Comm> {
         let mut file = self.open_proc_file(pid, b"comm")?;
-        Comm::from_writer(|buff| -> io::Result<usize> {
+        Comm::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
             let mut read_bytes = read_exact(&mut file, buff)?;
             if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
                 read_bytes -= 1;
@@ -121,7 +122,9 @@ impl Procfs {
     /// Return the content read from `<procfs_mount_path>/<pid>/environ` for `pid`.
     pub fn read_environ(&self, pid: u32) -> io::Result<Environ> {
         let mut file = self.open_proc_file(pid, b"environ")?;
-        Environ::from_writer(|buff| -> io::Result<usize> { read_exact(&mut file, buff) })
+        Environ::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
+            read_exact(&mut file, buff)
+        })
     }
 
     /// Return the content read from `<procfs_mount_path>/<pid>/loginuid` for `pid`.
@@ -144,7 +147,7 @@ impl Procfs {
         self.write_proc_file_path(&mut cursor, pid, filename)?;
         let path = CStr::from_bytes_until_nul(&path_buff)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        OsPath::from_writer(|buff| -> io::Result<usize> { readlink(path, buff) })
+        OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> { readlink(path, buff) })
     }
 
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/exe` for `pid`.

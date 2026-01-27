@@ -1,3 +1,4 @@
+use crate::buffer_writer::{BufferWriter, FromBufferWriter};
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::ops::Deref;
@@ -12,24 +13,21 @@ const TASK_COMM_LEN: usize = 16;
 pub struct Comm([u8; TASK_COMM_LEN]);
 
 impl Comm {
-    /// Create a [Comm] by providing a scratch buffer to `writer`. `writer` must return the amount
-    /// of bytes written into the received buffer.
-    pub fn from_writer<F>(writer: F) -> io::Result<Self>
-    where
-        F: FnOnce(&mut [u8]) -> io::Result<usize>,
-    {
+    pub fn as_os_str(&self) -> &OsStr {
+        let len = self.0[0] as usize;
+        OsStr::from_bytes(&self.0[1..1 + len])
+    }
+}
+
+impl FromBufferWriter for Comm {
+    fn from_buffer_writer<W: BufferWriter>(writer: W) -> io::Result<Self> {
         let mut comm = Self::default();
         let buff = &mut comm.0[1..];
-        let written_bytes = writer(buff)?;
+        let written_bytes = writer.write(buff)?;
         // Cap written bytes to be sure it is not bigger than buffer size.
         let capped_written_bytes = std::cmp::min(written_bytes, buff.len());
         comm.0[0] = capped_written_bytes as u8;
         Ok(comm)
-    }
-
-    pub fn as_os_str(&self) -> &OsStr {
-        let len = self.0[0] as usize;
-        OsStr::from_bytes(&self.0[1..1 + len])
     }
 }
 
@@ -41,22 +39,19 @@ impl OsPath {
     /// Max path length.
     const MAX_LEN: usize = 4096;
 
-    /// Create an [OsPath] by providing a scratch buffer to `writer`. `writer` must return the
-    /// amount of bytes written into the received buffer.
-    pub fn from_writer<F>(writer: F) -> io::Result<Self>
-    where
-        F: FnOnce(&mut [u8]) -> io::Result<usize>,
-    {
+    pub fn as_os_str(&self) -> &OsStr {
+        self.0.as_os_str()
+    }
+}
+
+impl FromBufferWriter for OsPath {
+    fn from_buffer_writer<W: BufferWriter>(writer: W) -> io::Result<Self> {
         let mut buff = [0u8; Self::MAX_LEN];
-        let written_bytes = writer(&mut buff)?;
+        let written_bytes = writer.write(&mut buff)?;
         // Cap written bytes to be sure it is not bigger than buffer size.
         let written_bytes = std::cmp::min(written_bytes, buff.len());
         let os_str = OsStr::from_bytes(&buff[..written_bytes]);
         Ok(Self(PathBuf::from(os_str)))
-    }
-
-    pub fn as_os_str(&self) -> &OsStr {
-        self.0.as_os_str()
     }
 }
 
@@ -77,22 +72,19 @@ impl Environ {
     /// Max environ length.
     const MAX_LEN: usize = 4096;
 
-    /// Create an [Environ] by providing a scratch buffer to `writer`. `writer` must return the
-    /// amount of bytes written into the received buffer.
-    pub fn from_writer<F>(writer: F) -> io::Result<Self>
-    where
-        F: FnOnce(&mut [u8]) -> io::Result<usize>,
-    {
+    pub fn as_os_str(&self) -> &OsStr {
+        self.0.as_os_str()
+    }
+}
+
+impl FromBufferWriter for Environ {
+    fn from_buffer_writer<W: BufferWriter>(writer: W) -> io::Result<Self> {
         let mut buff = [0u8; Self::MAX_LEN];
-        let written_bytes = writer(&mut buff)?;
+        let written_bytes = writer.write(&mut buff)?;
         // Cap written bytes to be sure it is not bigger than buffer size.
         let written_bytes = std::cmp::min(written_bytes, buff.len());
         let os_str = OsStr::from_bytes(&buff[..written_bytes]);
         Ok(Self(OsString::from(os_str)))
-    }
-
-    pub fn as_os_str(&self) -> &OsStr {
-        self.0.as_os_str()
     }
 }
 
