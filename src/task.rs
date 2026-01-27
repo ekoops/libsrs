@@ -4,6 +4,7 @@ use std::io;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
+use crate::capped_os_string::CappedOsString;
 
 const TASK_COMM_LEN: usize = 16;
 
@@ -63,28 +64,17 @@ impl Deref for OsPath {
     }
 }
 
-/// A wrapper around [OsString] representing the environ content for a process with a max length of
-/// [Environ::MAX_LEN].
+const MAX_ENVIRON_LEN: usize = 4096;
+
+/// A wrapper around [CappedOsString<MAX_ENVIRON_LEN>] representing the environ content for a
+/// process.
 #[derive(Clone, Default)]
-pub struct Environ(OsString);
-
-impl Environ {
-    /// Max environ length.
-    const MAX_LEN: usize = 4096;
-
-    pub fn as_os_str(&self) -> &OsStr {
-        self.0.as_os_str()
-    }
-}
+pub struct Environ(CappedOsString<MAX_ENVIRON_LEN>);
 
 impl FromBufferWriter for Environ {
     fn from_buffer_writer<W: BufferWriter>(writer: W) -> io::Result<Self> {
-        let mut buff = [0u8; Self::MAX_LEN];
-        let written_bytes = writer.write(&mut buff)?;
-        // Cap written bytes to be sure it is not bigger than buffer size.
-        let written_bytes = std::cmp::min(written_bytes, buff.len());
-        let os_str = OsStr::from_bytes(&buff[..written_bytes]);
-        Ok(Self(OsString::from(os_str)))
+        let capped_os_string = CappedOsString::from_buffer_writer(writer)?;
+        Ok(Self(capped_os_string))
     }
 }
 
