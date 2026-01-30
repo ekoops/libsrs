@@ -22,6 +22,22 @@ pub fn read_exact(file: &mut File, buff: &mut [u8]) -> io::Result<usize> {
     Ok(read_bytes)
 }
 
+/// An abstraction for types that can process lines of data.
+pub trait LineProcessor {
+    /// Process a line of data.
+    fn process(&mut self, line: &[u8]);
+}
+
+/// Blanket implementation allowing the use of closures as [LineProcessor].
+impl<F> LineProcessor for F
+where
+    F: FnMut(&[u8]),
+{
+    fn process(&mut self, line: &[u8]) {
+        self(line)
+    }
+}
+
 /// The maximum amount of bytes that a line can contain (including the trailing '\n') while
 /// processed by [scan_lines]. Note: this is intentionally kept small to be suitable for a stack
 /// allocation.
@@ -36,7 +52,7 @@ pub const MAX_SCAN_LINE_LEN: usize = 4096;
 pub fn scan_lines<R, P>(reader: &mut R, mut line_processor: P) -> io::Result<()>
 where
     R: Read,
-    P: FnMut(&[u8]),
+    P: LineProcessor,
 {
     let mut buff = [0u8; MAX_SCAN_LINE_LEN];
     // `bytes_in_buff` accounts for the total amount of data currently present in `buff`.
@@ -59,7 +75,7 @@ where
         {
             let line_end = line_start + newline_pos;
             let line = &buff[line_start..line_end];
-            line_processor(line);
+            line_processor.process(line);
             line_start = line_end + 1;
         }
 
@@ -104,7 +120,7 @@ mod tests {
         let mut reader = Cursor::new(input);
         let mut lines = Vec::new();
 
-        scan_lines(&mut reader, |line| {
+        scan_lines(&mut reader, |line: &[u8]| {
             // Convert bytes to String for easy assertion
             lines.push(String::from_utf8_lossy(line).to_string());
         })?;
@@ -194,7 +210,7 @@ mod tests {
         };
 
         let mut lines = Vec::new();
-        let res = scan_lines(&mut reader, |line| {
+        let res = scan_lines(&mut reader, |line: &[u8]| {
             lines.push(String::from_utf8_lossy(line).to_string());
         });
 
