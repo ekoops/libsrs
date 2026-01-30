@@ -1,10 +1,10 @@
 use crate::buffer_writer::{BufferWriter, FromBufferWriter};
+use crate::capped_os_string::CappedOsString;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use crate::capped_os_string::CappedOsString;
 
 const TASK_COMM_LEN: usize = 16;
 
@@ -20,8 +20,8 @@ impl Comm {
     }
 }
 
-impl FromBufferWriter for Comm {
-    fn from_buffer_writer<W: BufferWriter>(writer: W) -> io::Result<Self> {
+impl FromBufferWriter<u8> for Comm {
+    fn from_buffer_writer<W: BufferWriter<u8>>(writer: W) -> io::Result<Self> {
         let mut comm = Self::default();
         let buff = &mut comm.0[1..];
         let written_bytes = writer.write(buff)?;
@@ -45,8 +45,8 @@ impl OsPath {
     }
 }
 
-impl FromBufferWriter for OsPath {
-    fn from_buffer_writer<W: BufferWriter>(writer: W) -> io::Result<Self> {
+impl FromBufferWriter<u8> for OsPath {
+    fn from_buffer_writer<W: BufferWriter<u8>>(writer: W) -> io::Result<Self> {
         let mut buff = [0u8; Self::MAX_LEN];
         let written_bytes = writer.write(&mut buff)?;
         // Cap written bytes to be sure it is not bigger than buffer size.
@@ -71,8 +71,8 @@ const MAX_ENVIRON_LEN: usize = 4096;
 #[derive(Clone, Default)]
 pub struct Environ(CappedOsString<MAX_ENVIRON_LEN>);
 
-impl FromBufferWriter for Environ {
-    fn from_buffer_writer<W: BufferWriter>(writer: W) -> io::Result<Self> {
+impl FromBufferWriter<u8> for Environ {
+    fn from_buffer_writer<W: BufferWriter<u8>>(writer: W) -> io::Result<Self> {
         let capped_os_string = CappedOsString::from_buffer_writer(writer)?;
         Ok(Self(capped_os_string))
     }
@@ -93,8 +93,8 @@ const MAX_CMDLINE_LEN: usize = 4096;
 #[derive(Clone, Default)]
 pub struct Cmdline(CappedOsString<MAX_CMDLINE_LEN>);
 
-impl FromBufferWriter for Cmdline {
-    fn from_buffer_writer<W: BufferWriter>(writer: W) -> io::Result<Self> {
+impl FromBufferWriter<u8> for Cmdline {
+    fn from_buffer_writer<W: BufferWriter<u8>>(writer: W) -> io::Result<Self> {
         let capped_os_string = CappedOsString::from_buffer_writer(writer)?;
         Ok(Self(capped_os_string))
     }
