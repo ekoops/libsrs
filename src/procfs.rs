@@ -1,5 +1,5 @@
 use crate::buffer_writer::FromBufferWriter;
-use crate::read::{read_exact, readlink};
+use crate::read::{read_exact, readlink, scan_lines, LineProcessor};
 use crate::task::{Comm, Environ, OsPath};
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
 use std::fs::File;
@@ -147,6 +147,16 @@ impl Procfs {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
+    /// Scan each line of `<procfs_mount_path>/<pid>/status` for `pid` and pass it to
+    /// `line_processor`.
+    pub fn scan_status<P>(&self, pid: u32, line_processor: P) -> io::Result<()>
+    where
+        P: LineProcessor,
+    {
+        let mut file = self.open_proc_file(pid, b"status")?;
+        scan_lines(&mut file, line_processor)
+    }
+
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`,
     /// where `filename` is the binary string representation of `<filename>`.
     fn read_symlink(&self, pid: u32, filename: &[u8]) -> io::Result<OsPath> {
@@ -174,6 +184,8 @@ impl Procfs {
     }
 }
 
+// todo: the following tests are not written well. It's just a shallow way of verifying that
+//   implementations don't panic on common scenarios. Add comprehensive tests.
 #[cfg(test)]
 mod test {
     use super::*;
@@ -223,5 +235,21 @@ mod test {
         let procfs = procfs();
         let pid = std::process::id();
         let _cmdline = procfs.read_cmdline(pid).unwrap();
+    }
+
+    #[test]
+    fn scan_status() {
+        let procfs = procfs();
+        let pid = std::process::id();
+        struct Counter {
+            counter: usize,
+        }
+        impl LineProcessor for &mut Counter {
+            fn process(&mut self, _: &[u8]) {
+                self.counter += 1;
+            }
+        }
+        let mut counter = Counter { counter: 0 };
+        procfs.scan_status(pid, &mut counter).unwrap();
     }
 }
