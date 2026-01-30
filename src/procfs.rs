@@ -1,6 +1,7 @@
 use crate::buffer_writer::FromBufferWriter;
 use crate::read::{read_exact, readlink, scan_lines, LineProcessor};
 use crate::task::{Comm, Environ, OsPath};
+use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Cursor, Write};
@@ -53,7 +54,7 @@ impl Procfs {
     }
 
     /// Max length of the string representation of <pid>.
-    const MAX_PID_LEN: usize = 10;
+    const MAX_PID_LEN: usize = u32::FORMATTED_SIZE_DECIMAL;
     /// Max allowed length for a suffix after <mount_path>/<pid>/ (see [PATH_BUFF_SIZE]).
     const MAX_SUFFIX_LEN: usize = 32;
     /// Safety margin accounting for `/`s and trailing zeros in procfs path (see [PATH_BUFF_SIZE]).
@@ -77,9 +78,9 @@ impl Procfs {
 
     /// Write the string representation of `pid` into `cursor`.
     fn write_pid(cursor: &mut Cursor<&mut [u8]>, pid: u32) -> io::Result<()> {
-        let mut fmt_buff = itoa::Buffer::new();
-        let pid_str = fmt_buff.format(pid);
-        cursor.write_all(pid_str.as_bytes())
+        let mut buffer = [0u8; Self::MAX_PID_LEN];
+        let pid_bytes = lexical_core::write(pid, &mut buffer);
+        cursor.write_all(pid_bytes)
     }
 
     /// Write the mount path, `pid` and `filename` into `cursor`, separating them with `/`s.
@@ -138,13 +139,13 @@ impl Procfs {
     /// Return the content read from `<procfs_mount_path>/<pid>/loginuid` for `pid`.
     pub fn read_loginuid(&self, pid: u32) -> io::Result<u32> {
         let mut file = self.open_proc_file(pid, b"loginuid")?;
-        let mut buff = [0u8; 16];
+        let mut buff = [0u8; u32::FORMATTED_SIZE_DECIMAL];
         let mut read_bytes = read_exact(&mut file, &mut buff)?;
         if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
             read_bytes -= 1;
         }
-        btoi::btoi::<u32>(&buff[..read_bytes])
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        lexical_core::parse(&buff[..read_bytes])
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid number format"))
     }
 
     /// Scan each line of `<procfs_mount_path>/<pid>/status` for `pid` and pass it to
@@ -187,7 +188,7 @@ impl Procfs {
 // todo: the following tests are not written well. It's just a shallow way of verifying that
 //   implementations don't panic on common scenarios. Add comprehensive tests.
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     fn procfs() -> Procfs {
