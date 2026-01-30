@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{self, Cursor, Write};
 use std::os::unix::ffi::OsStrExt;
 use thiserror::Error;
+use crate::parse;
 
 /// Error returned by [Procfs::new].
 #[derive(Debug, Clone, Error)]
@@ -144,8 +145,7 @@ impl Procfs {
         if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
             read_bytes -= 1;
         }
-        lexical_core::parse(&buff[..read_bytes])
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid number format"))
+        parse::value_strict(&buff[..read_bytes])
     }
 
     /// Scan each line of `<procfs_mount_path>/<pid>/status` for `pid` and pass it to
