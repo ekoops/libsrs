@@ -108,6 +108,53 @@ impl Deref for Cmdline {
     }
 }
 
+/// A hierarchical stack of IDs representing the process in different PID namespaces.
+///
+/// The IDs are ordered from the one in outermost PID namespace to the one in the innermost one. The
+/// maximum number of IDs is capped by the Linux kernel's `MAX_PID_NS_LEVEL` value, fixed at 32.
+#[derive(Copy, Clone, Default)]
+pub struct PidNamespaceIds {
+    ids: [u32; 32],
+    len: u8,
+}
+
+impl FromBufferWriter<u32> for PidNamespaceIds {
+    fn from_buffer_writer<W: BufferWriter<u32>>(writer: W) -> io::Result<Self> {
+        let mut ns_ids = Self::default();
+        let ids = &mut ns_ids.ids[..];
+        let written_ids = writer.write(ids)?;
+        // Cap written IDs to be sure it is not bigger than maximum number of supported IDs.
+        let written_ids = std::cmp::min(written_ids, ids.len());
+        if written_ids == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "must have at least one ID",
+            ));
+        }
+        ns_ids.len = written_ids as u8;
+        Ok(ns_ids)
+    }
+}
+
+impl PidNamespaceIds {
+    #[inline]
+    pub fn as_slice(&self) -> &[u32] {
+        &self.ids[..self.len as usize]
+    }
+
+    /// Return the ID seen from the outermost PID namespace.
+    #[inline]
+    pub fn root(&self) -> u32 {
+        self.ids[0]
+    }
+
+    /// Return the ID seen from the process's current (innermost) PID namespace.
+    #[inline]
+    pub fn current(&self) -> u32 {
+        self.ids[self.len as usize - 1]
+    }
+}
+
 /// Represent a Linux task.
 #[derive(Clone)]
 pub struct Task {
@@ -117,5 +164,8 @@ pub struct Task {
     _root: OsPath,
     _environ: Environ,
     _cmdline: Cmdline,
+    _ns_tgids: PidNamespaceIds,
+    _ns_pids: PidNamespaceIds,
+    _ns_pgids: PidNamespaceIds,
     _loginuid: i32,
 }
