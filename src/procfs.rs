@@ -1,4 +1,5 @@
 use crate::buffer_writer::FromBufferWriter;
+use crate::parse;
 use crate::read::{read_exact, readlink, scan_lines, LineProcessor};
 use crate::task::{Comm, Environ, OsPath};
 use lexical_core::FormattedSize;
@@ -7,7 +8,6 @@ use std::fs::File;
 use std::io::{self, Cursor, Write};
 use std::os::unix::ffi::OsStrExt;
 use thiserror::Error;
-use crate::parse;
 
 /// Error returned by [Procfs::new].
 #[derive(Debug, Clone, Error)]
@@ -145,7 +145,7 @@ impl Procfs {
         if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
             read_bytes -= 1;
         }
-        parse::value_strict(&buff[..read_bytes])
+        parse::dec_strict(&buff[..read_bytes])
     }
 
     /// Scan each line of `<procfs_mount_path>/<pid>/status` for `pid` and pass it to
