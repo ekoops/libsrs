@@ -1,7 +1,7 @@
 use crate::buffer_writer::FromBufferWriter;
 use crate::parse;
 use crate::read::{read_exact, readlink, scan_lines, LineProcessor};
-use crate::task::{Comm, Environ, OsPath};
+use crate::task::{Cmdline, Comm, Environ, OsPath};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
 use std::fs::File;
@@ -130,9 +130,9 @@ impl Procfs {
     }
 
     /// Return the content read from `<procfs_mount_path>/<pid>/cmdline` for `pid`.
-    pub fn read_cmdline(&self, pid: u32) -> io::Result<Environ> {
+    pub fn read_cmdline(&self, pid: u32) -> io::Result<Cmdline> {
         let mut file = self.open_proc_file(pid, b"cmdline")?;
-        Environ::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
+        Cmdline::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
             read_exact(&mut file, buff)
         })
     }
