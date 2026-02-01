@@ -4,7 +4,7 @@ use std::cmp;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::ops::Deref;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 
 const TASK_COMM_LEN: usize = 16;
@@ -48,12 +48,13 @@ impl OsPath {
 
 impl FromBufferWriter<u8> for OsPath {
     fn from_buffer_writer<W: BufferWriter<u8>>(writer: W) -> io::Result<Self> {
-        let mut buff = [0u8; Self::MAX_LEN];
+        let mut buff = vec![0u8; Self::MAX_LEN];
         let written_bytes = writer.write(&mut buff)?;
         // Cap written bytes to be sure it is not bigger than buffer size.
         let written_bytes = cmp::min(written_bytes, buff.len());
-        let os_str = OsStr::from_bytes(&buff[..written_bytes]);
-        Ok(Self(PathBuf::from(os_str)))
+        buff.truncate(written_bytes);
+        let os_string = OsString::from_vec(buff);
+        Ok(Self(PathBuf::from(os_string)))
     }
 }
 
