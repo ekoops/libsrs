@@ -1,7 +1,7 @@
 use crate::buffer_writer::FromBufferWriter;
-use crate::parse;
-use crate::read::{read_exact, readlink, scan_lines, LineProcessor};
+use crate::read::LineProcessor;
 use crate::task::{Cmdline, Comm, Environ, OsPath};
+use crate::{parse, read};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
 use std::fs::File;
@@ -113,7 +113,7 @@ impl Procfs {
     pub fn read_comm(&self, pid: u32) -> io::Result<Comm> {
         let mut file = self.open_proc_file(pid, b"comm")?;
         Comm::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
-            let mut read_bytes = read_exact(&mut file, buff)?;
+            let mut read_bytes = read::exact(&mut file, buff)?;
             if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
                 read_bytes -= 1;
             }
@@ -125,7 +125,7 @@ impl Procfs {
     pub fn read_environ(&self, pid: u32) -> io::Result<Environ> {
         let mut file = self.open_proc_file(pid, b"environ")?;
         Environ::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
-            read_exact(&mut file, buff)
+            read::exact(&mut file, buff)
         })
     }
 
@@ -133,7 +133,7 @@ impl Procfs {
     pub fn read_cmdline(&self, pid: u32) -> io::Result<Cmdline> {
         let mut file = self.open_proc_file(pid, b"cmdline")?;
         Cmdline::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
-            read_exact(&mut file, buff)
+            read::exact(&mut file, buff)
         })
     }
 
@@ -141,7 +141,7 @@ impl Procfs {
     pub fn read_loginuid(&self, pid: u32) -> io::Result<u32> {
         let mut file = self.open_proc_file(pid, b"loginuid")?;
         let mut buff = [0u8; u32::FORMATTED_SIZE_DECIMAL];
-        let mut read_bytes = read_exact(&mut file, &mut buff)?;
+        let mut read_bytes = read::exact(&mut file, &mut buff)?;
         if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
             read_bytes -= 1;
         }
@@ -155,7 +155,7 @@ impl Procfs {
         P: LineProcessor,
     {
         let mut file = self.open_proc_file(pid, b"status")?;
-        scan_lines(&mut file, line_processor)
+        read::scan_lines(&mut file, line_processor)
     }
 
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`,
@@ -166,7 +166,9 @@ impl Procfs {
         self.write_proc_file_path(&mut cursor, pid, filename)?;
         let path = CStr::from_bytes_until_nul(&path_buff)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> { readlink(path, buff) })
+        OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
+            read::link(path, buff)
+        })
     }
 
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/exe` for `pid`.
@@ -190,6 +192,7 @@ impl Procfs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process;
 
     fn procfs() -> Procfs {
         let mount_path = ProcfsMountPath::new(OsString::from("/proc")).unwrap();
@@ -199,49 +202,49 @@ mod tests {
     #[test]
     fn read_comm() {
         let procfs = procfs();
-        let pid = std::process::id();
+        let pid = process::id();
         let _comm = procfs.read_comm(pid).unwrap();
     }
 
     #[test]
     fn read_exe() {
         let procfs = procfs();
-        let pid = std::process::id();
+        let pid = process::id();
         let _exe = procfs.read_exe(pid).unwrap();
     }
 
     #[test]
     fn read_cwd() {
         let procfs = procfs();
-        let pid = std::process::id();
+        let pid = process::id();
         let _cwd = procfs.read_cwd(pid).unwrap();
     }
 
     #[test]
     fn read_root() {
         let procfs = procfs();
-        let pid = std::process::id();
+        let pid = process::id();
         let _root = procfs.read_root(pid).unwrap();
     }
 
     #[test]
     fn read_loginuid() {
         let procfs = procfs();
-        let pid = std::process::id();
+        let pid = process::id();
         let _loginuid = procfs.read_loginuid(pid).unwrap() as i32;
     }
 
     #[test]
     fn read_cmdline() {
         let procfs = procfs();
-        let pid = std::process::id();
+        let pid = process::id();
         let _cmdline = procfs.read_cmdline(pid).unwrap();
     }
 
     #[test]
     fn scan_status() {
         let procfs = procfs();
-        let pid = std::process::id();
+        let pid = process::id();
         struct Counter {
             counter: usize,
         }

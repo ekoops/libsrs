@@ -1,5 +1,6 @@
 use crate::buffer_writer::{BufferWriter, FromBufferWriter};
 use crate::capped_os_string::CappedOsString;
+use std::cmp;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::ops::Deref;
@@ -26,7 +27,7 @@ impl FromBufferWriter<u8> for Comm {
         let buff = &mut comm.0[1..];
         let written_bytes = writer.write(buff)?;
         // Cap written bytes to be sure it is not bigger than buffer size.
-        let capped_written_bytes = std::cmp::min(written_bytes, buff.len());
+        let capped_written_bytes = cmp::min(written_bytes, buff.len());
         comm.0[0] = capped_written_bytes as u8;
         Ok(comm)
     }
@@ -50,7 +51,7 @@ impl FromBufferWriter<u8> for OsPath {
         let mut buff = [0u8; Self::MAX_LEN];
         let written_bytes = writer.write(&mut buff)?;
         // Cap written bytes to be sure it is not bigger than buffer size.
-        let written_bytes = std::cmp::min(written_bytes, buff.len());
+        let written_bytes = cmp::min(written_bytes, buff.len());
         let os_str = OsStr::from_bytes(&buff[..written_bytes]);
         Ok(Self(PathBuf::from(os_str)))
     }
@@ -124,7 +125,7 @@ impl FromBufferWriter<u32> for PidNamespaceIds {
         let ids = &mut ns_ids.ids[..];
         let written_ids = writer.write(ids)?;
         // Cap written IDs to be sure it is not bigger than maximum number of supported IDs.
-        let written_ids = std::cmp::min(written_ids, ids.len());
+        let written_ids = cmp::min(written_ids, ids.len());
         if written_ids == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

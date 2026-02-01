@@ -9,7 +9,7 @@ use std::io::Read;
 /// filling the buffer, or an unrecoverable error (any error of kind other than
 /// [io::ErrorKind::Interrupted]) is encountered. Any interruption (error of kind
 /// [io::ErrorKind::Interrupted]) is handled by continuing the reading from `file`.
-pub fn read_exact(file: &mut File, buff: &mut [u8]) -> io::Result<usize> {
+pub fn exact(file: &mut File, buff: &mut [u8]) -> io::Result<usize> {
     let mut read_bytes = 0;
     while read_bytes < buff.len() {
         match file.read(&mut buff[read_bytes..]) {
@@ -96,7 +96,7 @@ where
 }
 
 /// Read the content of the symbolic link `path` into `buff`. Return the amount of data read.
-pub fn readlink(path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
+pub fn link(path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
     let ret = unsafe {
         libc::readlink(
             path.as_ptr() as *const c_char,

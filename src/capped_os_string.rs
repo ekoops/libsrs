@@ -3,6 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
+use std::cmp;
 
 /// An [OsString] with a maximum length equal to [MAX_LEN].
 #[derive(Clone, Default)]
@@ -14,7 +15,7 @@ impl<const MAX_LEN: usize> FromBufferWriter<u8> for CappedOsString<MAX_LEN> {
         let mut buff = [0u8; MAX_LEN];
         let written_bytes = writer.write(&mut buff)?;
         // Cap written bytes to be sure it is not bigger than buffer size.
-        let written_bytes = std::cmp::min(written_bytes, buff.len());
+        let written_bytes = cmp::min(written_bytes, buff.len());
         let os_str = OsStr::from_bytes(&buff[..written_bytes]);
         Ok(Self(OsString::from(os_str)))
     }
