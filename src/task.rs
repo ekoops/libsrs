@@ -1,5 +1,7 @@
 use crate::buffer_writer::{BufferWriter, FromBufferWriter};
 use crate::capped_os_string::CappedOsString;
+use crate::parse;
+use crate::procfs::Procfs;
 use std::cmp;
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -110,13 +112,17 @@ impl Deref for Cmdline {
     }
 }
 
+/// Maximum number of nested PID namespaces. Taken from Linux kernel:
+/// https://elixir.bootlin.com/linux/v6.18.6/source/include/linux/pid_namespace.h#L15
+const MAX_PID_NS_LEVEL: usize = 32;
+
 /// A hierarchical stack of IDs representing the process in different PID namespaces.
 ///
 /// The IDs are ordered from the one in outermost PID namespace to the one in the innermost one. The
 /// maximum number of IDs is capped by the Linux kernel's `MAX_PID_NS_LEVEL` value, fixed at 32.
 #[derive(Copy, Clone, Default)]
 pub struct PidNamespaceIds {
-    ids: [u32; 32],
+    ids: [u32; MAX_PID_NS_LEVEL],
     len: u8,
 }
 
@@ -157,17 +163,189 @@ impl PidNamespaceIds {
     }
 }
 
+/// Container for data taken from procfs' status file.
+#[allow(dead_code)]
+#[derive(Default)]
+struct TaskProcfsStatus {
+    tgid: u32,
+    ruid: u32,
+    euid: u32,
+    suid: u32,
+    fsuid: u32,
+    rgid: u32,
+    egid: u32,
+    sgid: u32,
+    fsgid: u32,
+    cap_inh: u64,
+    cap_prm: u64,
+    cap_eff: u64,
+    ppid: u32,
+    vm_size_kb: u64,
+    vm_rss_kb: u64,
+    vm_swap_kb: u64,
+    ns_pids: PidNamespaceIds,
+    ns_pgids: PidNamespaceIds,
+    ns_tgids: PidNamespaceIds,
+}
+
+impl TaskProcfsStatus {
+    fn parse_pids_from_line(mut line: &[u8]) -> io::Result<PidNamespaceIds> {
+        PidNamespaceIds::from_buffer_writer(|buff: &mut [u32]| {
+            let mut num_pids = 0;
+            while let Ok(pid) = parse::next_dec(&mut line) {
+                if num_pids == MAX_PID_NS_LEVEL {
+                    break;
+                }
+                buff[num_pids] = pid;
+                num_pids += 1;
+            }
+            Ok(num_pids)
+        })
+    }
+
+    /// Parse a single line from procfs' status file and updates the corresponding field.
+    fn update_from_line(&mut self, line: &[u8]) -> io::Result<()> {
+        let Some(&first_char) = line.first() else {
+            return Ok(());
+        };
+
+        match first_char {
+            b'T' => {
+                if let Some(line) = line.strip_prefix(b"Tgid:") {
+                    self.tgid = parse::dec(line)?;
+                }
+            }
+            b'U' => {
+                if let Some(mut line) = line.strip_prefix(b"Uid:") {
+                    self.ruid = parse::next_dec(&mut line)?;
+                    self.euid = parse::next_dec(&mut line)?;
+                    self.suid = parse::next_dec(&mut line)?;
+                    self.fsuid = parse::next_dec(&mut line)?;
+                }
+            }
+            b'G' => {
+                if let Some(mut line) = line.strip_prefix(b"Gid:") {
+                    self.rgid = parse::next_dec(&mut line)?;
+                    self.egid = parse::next_dec(&mut line)?;
+                    self.sgid = parse::next_dec(&mut line)?;
+                    self.fsgid = parse::next_dec(&mut line)?;
+                }
+            }
+            b'C' => {
+                let Some(line) = line.strip_prefix(b"Cap") else {
+                    return Ok(());
+                };
+                if let Some(line) = line.strip_prefix(b"Inh:") {
+                    self.cap_inh = parse::hex(line)?;
+                } else if let Some(line) = line.strip_prefix(b"Prm:") {
+                    self.cap_prm = parse::hex(line)?;
+                } else if let Some(line) = line.strip_prefix(b"Eff:") {
+                    self.cap_eff = parse::hex(line)?;
+                }
+            }
+            b'P' => {
+                if let Some(line) = line.strip_prefix(b"PPid:") {
+                    self.ppid = parse::dec(line)?;
+                }
+            }
+            b'V' => {
+                let Some(line) = line.strip_prefix(b"Vm") else {
+                    return Ok(());
+                };
+                if let Some(line) = line.strip_prefix(b"Size:") {
+                    self.vm_size_kb = parse::dec(line)?;
+                } else if let Some(line) = line.strip_prefix(b"RSS:") {
+                    self.vm_rss_kb = parse::dec(line)?;
+                } else if let Some(line) = line.strip_prefix(b"Swap:") {
+                    self.vm_swap_kb = parse::dec(line)?;
+                }
+            }
+            b'N' => {
+                let Some(line) = line.strip_prefix(b"NS") else {
+                    return Ok(());
+                };
+                if let Some(mut line) = line.strip_prefix(b"pid:") {
+                    self.ns_pids = Self::parse_pids_from_line(&mut line)?;
+                } else if let Some(mut line) = line.strip_prefix(b"pgid:") {
+                    self.ns_pgids = Self::parse_pids_from_line(&mut line)?;
+                } else if let Some(mut line) = line.strip_prefix(b"tgid:") {
+                    self.ns_tgids = Self::parse_pids_from_line(&mut line)?;
+                }
+            }
+            _ => return Ok(()),
+        };
+        Ok(())
+    }
+}
+
 /// Represent a Linux task.
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct Task {
-    _comm: Comm,
-    _exe: OsPath,
-    _cwd: OsPath,
-    _root: OsPath,
-    _environ: Environ,
-    _cmdline: Cmdline,
-    _ns_tgids: PidNamespaceIds,
-    _ns_pids: PidNamespaceIds,
-    _ns_pgids: PidNamespaceIds,
-    _loginuid: i32,
+    comm: Comm,
+    exe: OsPath,
+    cwd: OsPath,
+    root: OsPath,
+    environ: Environ,
+    cmdline: Cmdline,
+    loginuid: i32,
+    tgid: u32,
+    ruid: u32,
+    euid: u32,
+    suid: u32,
+    fsuid: u32,
+    rgid: u32,
+    egid: u32,
+    sgid: u32,
+    fsgid: u32,
+    cap_inh: u64,
+    cap_prm: u64,
+    cap_eff: u64,
+    ppid: u32,
+    vm_size_kb: u64,
+    vm_rss_kb: u64,
+    vm_swap_kb: u64,
+    ns_pids: PidNamespaceIds,
+    ns_pgids: PidNamespaceIds,
+    ns_tgids: PidNamespaceIds,
+}
+
+impl Task {
+    /// Create [Self] for `pid` by gathering data from `procfs`.
+    pub fn from_procfs(procfs: &Procfs, pid: u32) -> io::Result<Self> {
+        let mut procfs_status = TaskProcfsStatus::default();
+        procfs.scan_status(pid, |line: &[u8]| {
+            // todo: extend LineProcessor to allow to return an io::Result
+            procfs_status.update_from_line(line).unwrap()
+        })?;
+        let task = Self {
+            comm: procfs.read_comm(pid)?,
+            exe: procfs.read_exe(pid)?,
+            cwd: procfs.read_cwd(pid)?,
+            root: procfs.read_root(pid)?,
+            environ: procfs.read_environ(pid)?,
+            cmdline: procfs.read_cmdline(pid)?,
+            loginuid: procfs.read_loginuid(pid)? as i32,
+            tgid: procfs_status.tgid,
+            ruid: procfs_status.ruid,
+            euid: procfs_status.euid,
+            suid: procfs_status.suid,
+            fsuid: procfs_status.fsuid,
+            rgid: procfs_status.rgid,
+            egid: procfs_status.egid,
+            sgid: procfs_status.sgid,
+            fsgid: procfs_status.fsgid,
+            cap_inh: procfs_status.cap_inh,
+            cap_prm: procfs_status.cap_prm,
+            cap_eff: procfs_status.cap_eff,
+            ppid: procfs_status.ppid,
+            vm_size_kb: procfs_status.vm_size_kb,
+            vm_rss_kb: procfs_status.vm_rss_kb,
+            vm_swap_kb: procfs_status.vm_swap_kb,
+            ns_pids: procfs_status.ns_pids,
+            ns_pgids: procfs_status.ns_pgids,
+            ns_tgids: procfs_status.ns_tgids,
+        };
+        Ok(task)
+    }
 }
