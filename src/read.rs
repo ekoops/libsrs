@@ -66,25 +66,27 @@ where
         };
         bytes_in_buff += read_bytes;
 
-        // Iterate over each line and pass it to the line processor. If no '\n' is found,
-        // `line_start` remains 0 and the below shifting logic doesn't run.
-        let mut line_start = 0;
-        while let Some(newline_pos) = buff[line_start..bytes_in_buff]
-            .iter()
-            .position(|c| *c == b'\n')
-        {
-            let line_end = line_start + newline_pos;
-            let line = &buff[line_start..line_end];
+        // Iterate over each line and pass them to the line processor. If no '\n' is found,
+        // `processed_data_len` remains 0 and the below shifting logic doesn't run.
+        let mut processed_data_len = 0;
+        for chunk in buff[..bytes_in_buff].split_inclusive(|&c| c == b'\n') {
+            // Don't process lines with no trailing '\n' (this can only be the last line).
+            if !chunk.ends_with(&[b'\n']) {
+                break;
+            }
+
+            // Strip the trailing '\n' from chunk and pass the resulting line to the processor.
+            let line = &chunk[..chunk.len() - 1];
             line_processor.process(line);
-            line_start = line_end + 1;
+            processed_data_len += chunk.len();
         }
 
         // Shift unprocessed data at the beginning of `buff`. This logic only runs if there's
         // actually some unprocessed data, and we have processed at least some lines in this
         // iteration.
-        let unprocessed_data_len = bytes_in_buff - line_start;
-        if unprocessed_data_len > 0 && line_start > 0 {
-            buff.copy_within(line_start..bytes_in_buff, 0);
+        let unprocessed_data_len = bytes_in_buff - processed_data_len;
+        if unprocessed_data_len > 0 && processed_data_len > 0 {
+            buff.copy_within(processed_data_len..bytes_in_buff, 0);
         }
         bytes_in_buff = unprocessed_data_len;
 
