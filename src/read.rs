@@ -1,18 +1,16 @@
 use libc::c_char;
 use std::ffi::CStr;
-use std::fs::File;
-use std::io;
-use std::io::Read;
+use std::io::{self, Read};
 
-/// Fill `buff` with data read from `file`. Returns the amount `n` of bytes read from `file`, such
-/// that `0` <= `n` <= `buff.len()`. `n` < `buff.len()` only if the end-of-file is reached before
-/// filling the buffer, or an unrecoverable error (any error of kind other than
+/// Fill `buff` with data read from `reader`. Returns the amount `n` of bytes read from `reader`,
+/// such that `0` <= `n` <= `buff.len()`. `n` < `buff.len()` only if the end-of-file is reached
+/// before filling the buffer, or an unrecoverable error (any error of kind other than
 /// [io::ErrorKind::Interrupted]) is encountered. Any interruption (error of kind
-/// [io::ErrorKind::Interrupted]) is handled by continuing the reading from `file`.
-pub fn exact(file: &mut File, buff: &mut [u8]) -> io::Result<usize> {
+/// [io::ErrorKind::Interrupted]) is handled by continuing the reading from `reader`.
+pub fn exact<R: Read>(reader: &mut R, buff: &mut [u8]) -> io::Result<usize> {
     let mut read_bytes = 0;
     while read_bytes < buff.len() {
-        match file.read(&mut buff[read_bytes..]) {
+        match reader.read(&mut buff[read_bytes..]) {
             Ok(0) => break,
             Ok(n) => read_bytes += n,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
