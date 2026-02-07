@@ -206,16 +206,6 @@ impl<D: Driver> Procfs<D> {
         parse::dec_strict(&buff[..read_bytes])
     }
 
-    /// Scan each line of `<procfs_mount_path>/<pid>/status` for `pid` and pass it to
-    /// `line_processor`.
-    pub fn scan_status<P>(&self, pid: u32, line_processor: P) -> io::Result<()>
-    where
-        P: LineProcessor,
-    {
-        let mut reader = self.open(pid, b"status")?;
-        read::scan_lines(&mut reader, line_processor)
-    }
-
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`.
     ///
     /// `filename` is the binary string representation of `<filename>`.
@@ -245,6 +235,18 @@ impl<D: Driver> Procfs<D> {
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/root` for `pid`.
     pub fn read_root(&self, pid: u32) -> io::Result<OsPath> {
         self.read_symlink(pid, b"root")
+    }
+
+    /// Scan each line of `<procfs_mount_path>/<pid>/status` for `pid` and pass it to
+    /// `line_processor`.
+    pub fn scan_status<P>(&self, pid: u32, line_processor: P) -> io::Result<()>
+    where
+        P: LineProcessor,
+    {
+        let mut reader = self.open(pid, b"status")?;
+        const BUFFER_SIZE: usize = 4096;
+        let mut buff = [0u8; BUFFER_SIZE];
+        read::scan_lines(&mut reader, &mut buff, line_processor)
     }
 }
 

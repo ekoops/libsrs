@@ -36,23 +36,28 @@ where
     }
 }
 
-/// The maximum amount of bytes that a line can contain (including the trailing '\n') while
-/// processed by [scan_lines]. Note: this is intentionally kept small to be suitable for a stack
-/// allocation.
-pub const MAX_SCAN_LINE_LEN: usize = 4096;
-
-/// Efficiently read all lines from `reader`, passing them to `line_processor` for processing. Lines
-/// are read till `reader` returns 0 as the number of bytes read. Any error of kind
-/// [io::ErrorKind::Interrupted] is handled by restarting the read operation. Lines bigger than
-/// [MAX_SCAN_LINE_LEN] results in a [io::ErrorKind::InvalidData] kind of error. Each line is passed
-/// to `line_processor` without the trailing '\n' character. Any trailing line with no trailing `\n`
-/// character is not provided to `line_processor`.
-pub fn scan_lines<R, P>(reader: &mut R, mut line_processor: P) -> io::Result<()>
+/// Reads lines from `reader` and passes them to `line_processor`, using `buff` as a scratch buffer.
+///
+/// This function reads data until End-of-File (EOF). Each complete line (delimited by `\n`) is
+/// passed to `line_processor` with the trailing newline character removed.
+///
+/// # Behavior
+///
+/// * **Buffer Limit:** The length of `buff` determines the maximum allowed line length. 
+/// * **Interruption:** Errors of kind [`io::ErrorKind::Interrupted`] are automatically retried.
+/// * **Partial Lines:** Any data at the end of the stream that is not terminated by a newline
+///   is **discarded** and not passed to the processor.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] if:
+/// * A line is longer than `buff.len()` (returns [`io::ErrorKind::InvalidData`]).
+/// * The underlying reader returns a non-recoverable error.
+pub fn scan_lines<R, P>(reader: &mut R, buff: &mut [u8], mut line_processor: P) -> io::Result<()>
 where
     R: Read,
     P: LineProcessor,
 {
-    let mut buff = [0u8; MAX_SCAN_LINE_LEN];
     // `bytes_in_buff` accounts for the total amount of data currently present in `buff`.
     let mut bytes_in_buff = 0usize;
     loop {
@@ -238,12 +243,15 @@ mod tests {
         assert_eq!(res.unwrap_err().kind(), io::ErrorKind::Other);
     }
 
+    /// The size of the scratch buffer provided to `scan_lines()`.
+    const SCRATCH_BUFF_SIZE: usize = 4096;
+
     /// Collect all lines read from `input` into a vector of strings.
     fn collect_lines(input: &[u8]) -> io::Result<Vec<String>> {
         let mut reader = Cursor::new(input);
         let mut lines = Vec::new();
-
-        scan_lines(&mut reader, |line: &[u8]| {
+        let mut buff = [0u8; SCRATCH_BUFF_SIZE];
+        scan_lines(&mut reader, &mut buff, |line: &[u8]| {
             // Convert bytes to String for easy assertion
             lines.push(String::from_utf8_lossy(line).to_string());
         })?;
@@ -282,17 +290,17 @@ mod tests {
     #[test]
     fn test_scan_lines_exact_buffer_limit() {
         // Create a line which size (including '\n') is equal to the upper limit.
-        let mut input = vec![b'a'; MAX_SCAN_LINE_LEN - 1];
+        let mut input = vec![b'a'; SCRATCH_BUFF_SIZE - 1];
         input.push(b'\n');
         let lines = collect_lines(&input).unwrap();
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].len(), MAX_SCAN_LINE_LEN - 1);
+        assert_eq!(lines[0].len(), SCRATCH_BUFF_SIZE - 1);
     }
 
     #[test]
     fn test_scan_lines_exceeds_buffer_limit() {
-        // Create a line which size (including '\n') is equal to the upper limit.
-        let input = vec![b'a'; MAX_SCAN_LINE_LEN + 1];
+        // Create a line which size (including '\n') is above the upper limit.
+        let input = vec![b'a'; SCRATCH_BUFF_SIZE + 1];
         let result = collect_lines(&input);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
@@ -312,8 +320,9 @@ mod tests {
             inner: Cursor::new(input.to_vec()),
             interrupted: false,
         };
+        let mut buff = [0u8; SCRATCH_BUFF_SIZE];
         let mut lines = Vec::new();
-        let res = scan_lines(&mut reader, |line: &[u8]| {
+        let res = scan_lines(&mut reader, &mut buff, |line: &[u8]| {
             lines.push(String::from_utf8_lossy(line).to_string());
         });
         assert!(res.is_ok());
