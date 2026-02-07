@@ -5,115 +5,173 @@ use crate::{parse, read};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
 use std::fs::File;
-use std::io::{self, Cursor, Write};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use thiserror::Error;
 
-/// Error returned by [Procfs::new].
+/// Error returned by [MountPath::new].
 #[derive(Debug, Clone, Error)]
-pub enum ProcfsMountPathError {
-    #[error(
-        "procfs mount path too long (greater than {})",
-        ProcfsMountPath::MAX_LEN
-    )]
+pub enum MountPathError {
+    #[error("procfs mount path too long (greater than {})", MountPath::MAX_LEN)]
     TooLong,
+    #[error("procfs mount path cannot be empty")]
+    Empty,
     #[error(transparent)]
     NulError(#[from] NulError),
 }
 
-/// A procfs mount path with max length with a max length of [ProcfsMountPath::MAX_LEN].
-pub struct ProcfsMountPath(CString);
+/// A procfs mount path with a max length of [MountPath::MAX_LEN].
+pub struct MountPath(CString);
 
-impl ProcfsMountPath {
+impl MountPath {
     /// Max allowed procfs mount path length.
     pub const MAX_LEN: usize = 256;
 
-    /// Create a new [ProcfsMountPath] from the specified path.
-    pub fn new(path: OsString) -> Result<Self, ProcfsMountPathError> {
+    /// Create a new [MountPath] from `path`.
+    pub fn new(path: OsString) -> Result<Self, MountPathError> {
         let mut path_bytes = path.as_bytes();
+        if path_bytes.len() == 0 {
+            return Err(MountPathError::Empty);
+        }
+
         if path_bytes.last() == Some(&b'/') {
             path_bytes = &path_bytes[..path_bytes.len() - 1];
         }
-
         if path_bytes.len() > Self::MAX_LEN {
-            Err(ProcfsMountPathError::TooLong)
+            Err(MountPathError::TooLong)
         } else {
             Ok(Self(CString::new(path_bytes)?))
         }
     }
 }
 
-/// A helper type allowing to extract data from procfs.
-pub struct Procfs {
-    mount_path: ProcfsMountPath,
+/// An abstraction for filesystem accesses required by [Procfs].
+pub trait Driver {
+    type Reader: io::Read;
+
+    /// Create a [Self::Reader] for `path`.
+    ///
+    /// `path` is the non-NUL-terminated binary string representation of a file path.
+    fn open(&self, path: &[u8]) -> io::Result<Self::Reader>;
+
+    /// Return the content of the symbolic link at `path` and store it in `buff`.
+    ///
+    /// `path` is the NUL-terminated binary string representation of a file path.
+    fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize>;
 }
 
-impl Procfs {
-    /// Create a new [Procfs] instance from the specified procfs `mount_path`.
-    pub fn new(mount_path: ProcfsMountPath) -> Self {
-        Self { mount_path }
+/// The canonical [Driver] implementation.
+pub struct RealDriver;
+
+impl Driver for RealDriver {
+    type Reader = File;
+
+    #[inline(always)]
+    fn open(&self, path: &[u8]) -> io::Result<Self::Reader> {
+        let path = OsStr::from_bytes(path);
+        File::open(path)
     }
 
-    /// Max length of the string representation of <pid>.
-    const MAX_PID_LEN: usize = u32::FORMATTED_SIZE_DECIMAL;
-    /// Max allowed length for a suffix after <mount_path>/<pid>/ (see [PATH_BUFF_SIZE]).
-    const MAX_SUFFIX_LEN: usize = 32;
-    /// Safety margin accounting for `/`s and trailing zeros in procfs path (see [PATH_BUFF_SIZE]).
-    const PADDING: usize = 16;
-    /// The size of the buffer used to construct procfs file paths. The buffer content is structured
-    /// in the following way: <mount_path>/<pid>/<suffix><zero_pad>.
-    const PATH_BUFF_SIZE: usize =
-        ProcfsMountPath::MAX_LEN + Self::MAX_PID_LEN + Self::MAX_SUFFIX_LEN + Self::PADDING;
+    #[inline(always)]
+    fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
+        read::link(path, buff)
+    }
+}
+
+/// A helper type allowing to extract data from procfs. If unspecified, it leverages [ReadDriver]
+/// for filesystem accesses.
+pub struct Procfs<D: Driver = RealDriver> {
+    mount_path: MountPath,
+    driver: D,
+}
+
+impl Procfs<RealDriver> {
+    /// Create a new [Procfs] instance from the specified procfs `mount_path`.
+    pub fn new(mount_path: MountPath) -> Self {
+        Self {
+            mount_path,
+            driver: RealDriver,
+        }
+    }
+}
+
+// note: the following constants are defined outside the impl block because Rust doesn't allow to
+// use constants defined in a generic impl block.
+
+/// Max length of the string representation of <pid>.
+const MAX_PID_LEN: usize = u32::FORMATTED_SIZE_DECIMAL;
+/// Max allowed length for a suffix after <mount_path>/<pid>/ (see [PATH_BUFF_SIZE]).
+const MAX_SUFFIX_LEN: usize = 32;
+/// Safety margin accounting for `/`s and trailing zeros in procfs path (see [PATH_BUFF_SIZE]).
+const PADDING: usize = 16;
+/// The size of the buffer used to construct procfs file paths. The buffer content is structured
+/// in the following way: <mount_path>/<pid>/<suffix><zero_pad>.
+const PATH_BUFF_SIZE: usize = MountPath::MAX_LEN + MAX_PID_LEN + MAX_SUFFIX_LEN + PADDING;
+
+impl<D: Driver> Procfs<D> {
+    /// Create a new [Procfs] instance from the specified procfs `mount_path` leveraging the
+    /// specified `driver` to perform file system accesses.
+    pub fn new_with_driver(mount_path: MountPath, driver: D) -> Self {
+        Self { mount_path, driver }
+    }
 
     /// Create a new path buffer that can be used to build a path.
     #[inline]
-    fn new_path_buff() -> [u8; Self::PATH_BUFF_SIZE] {
-        [0u8; Self::PATH_BUFF_SIZE]
+    fn new_path_buff() -> [u8; PATH_BUFF_SIZE] {
+        [0u8; PATH_BUFF_SIZE]
     }
 
-    /// Write the mount path into `cursor`.
-    fn write_mount_path(&self, cursor: &mut Cursor<&mut [u8]>) -> io::Result<()> {
-        let mount_path = self.mount_path.0.as_bytes();
-        cursor.write_all(mount_path)
+    /// Update `*buff` to point to `len` bytes forward.
+    #[inline]
+    fn advance_buff(buff: &mut &mut [u8], len: usize) {
+        let (_, new_buff) = std::mem::take(buff).split_at_mut(len);
+        *buff = new_buff;
     }
 
-    /// Write the string representation of `pid` into `cursor`.
-    fn write_pid(cursor: &mut Cursor<&mut [u8]>, pid: u32) -> io::Result<()> {
-        let mut buffer = [0u8; Self::MAX_PID_LEN];
-        let pid_bytes = lexical_core::write(pid, &mut buffer);
-        cursor.write_all(pid_bytes)
+    /// Write `bytes` in `*buff` and return `bytes.len()`. Update `*buff` to point to the first
+    /// unwritten byte.
+    #[inline(always)]
+    fn write_bytes(buff: &mut &mut [u8], bytes: &[u8]) -> usize {
+        let bytes_len = bytes.len();
+        buff[..bytes_len].copy_from_slice(bytes);
+        Self::advance_buff(buff, bytes_len);
+        bytes_len
     }
 
-    /// Write the mount path, `pid` and `filename` into `cursor`, separating them with `/`s.
-    fn write_proc_file_path(
-        &self,
-        cursor: &mut Cursor<&mut [u8]>,
-        pid: u32,
-        filename: &[u8],
-    ) -> io::Result<()> {
-        self.write_mount_path(cursor)?;
-        cursor.write_all(b"/")?;
-        Self::write_pid(cursor, pid)?;
-        cursor.write_all(b"/")?;
-        cursor.write_all(filename)
+    /// Write the string representation of `pid` into `buff` and return the number of bytes written.
+    fn write_pid<'a, 'b: 'a>(buff: &'a mut &'b mut [u8], pid: u32) -> usize {
+        let pid_bytes = lexical_core::write(pid, *buff);
+        let written_bytes = pid_bytes.len();
+        Self::advance_buff(buff, written_bytes);
+        written_bytes
     }
 
-    /// Open the file at `<procfs_mount_path>/<pid>/<filename>` for `pid`, where `filename` is the
-    /// binary string representation of `<filename>`.
-    fn open_proc_file(&self, pid: u32, filename: &[u8]) -> io::Result<File> {
+    /// Write the mount path, `pid` and `filename` into `buff`, separating them with `/`s, and
+    /// return the number of bytes written.
+    fn write_proc_file_path(&self, mut buff: &mut [u8], pid: u32, filename: &[u8]) -> usize {
+        let mut written_bytes = Self::write_bytes(&mut buff, self.mount_path.0.as_bytes());
+        written_bytes += Self::write_bytes(&mut buff, b"/");
+        written_bytes += Self::write_pid(&mut buff, pid);
+        written_bytes += Self::write_bytes(&mut buff, b"/");
+        written_bytes += Self::write_bytes(&mut buff, filename);
+        written_bytes
+    }
+
+    /// Create a reader for `<procfs_mount_path>/<pid>/<filename>`.
+    ///
+    /// `filename` is the binary string representation of `<filename>`.
+    fn open(&self, pid: u32, filename: &[u8]) -> io::Result<D::Reader> {
         let mut path_buff = Self::new_path_buff();
-        let mut cursor = Cursor::new(&mut path_buff[..]);
-        self.write_proc_file_path(&mut cursor, pid, filename)?;
-        let written_bytes = cursor.position() as usize;
-        let path = OsStr::from_bytes(&path_buff[..written_bytes]);
-        File::open(path)
+        let written_bytes = self.write_proc_file_path(&mut path_buff[..], pid, filename);
+        let path = &path_buff[..written_bytes];
+        self.driver.open(path)
     }
 
     /// Return the content read from `<procfs_mount_path>/<pid>/comm` for `pid`.
     pub fn read_comm(&self, pid: u32) -> io::Result<Comm> {
-        let mut file = self.open_proc_file(pid, b"comm")?;
+        let mut reader = self.open(pid, b"comm")?;
         Comm::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
-            let mut read_bytes = read::exact(&mut file, buff)?;
+            let mut read_bytes = read::exact(&mut reader, buff)?;
             if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
                 read_bytes -= 1;
             }
@@ -123,25 +181,25 @@ impl Procfs {
 
     /// Return the content read from `<procfs_mount_path>/<pid>/environ` for `pid`.
     pub fn read_environ(&self, pid: u32) -> io::Result<Environ> {
-        let mut file = self.open_proc_file(pid, b"environ")?;
+        let mut reader = self.open(pid, b"environ")?;
         Environ::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
-            read::exact(&mut file, buff)
+            read::exact(&mut reader, buff)
         })
     }
 
     /// Return the content read from `<procfs_mount_path>/<pid>/cmdline` for `pid`.
     pub fn read_cmdline(&self, pid: u32) -> io::Result<Cmdline> {
-        let mut file = self.open_proc_file(pid, b"cmdline")?;
+        let mut reader = self.open(pid, b"cmdline")?;
         Cmdline::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
-            read::exact(&mut file, buff)
+            read::exact(&mut reader, buff)
         })
     }
 
     /// Return the content read from `<procfs_mount_path>/<pid>/loginuid` for `pid`.
     pub fn read_loginuid(&self, pid: u32) -> io::Result<u32> {
-        let mut file = self.open_proc_file(pid, b"loginuid")?;
+        let mut reader = self.open(pid, b"loginuid")?;
         let mut buff = [0u8; u32::FORMATTED_SIZE_DECIMAL];
-        let mut read_bytes = read::exact(&mut file, &mut buff)?;
+        let mut read_bytes = read::exact(&mut reader, &mut buff)?;
         if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
             read_bytes -= 1;
         }
@@ -154,20 +212,23 @@ impl Procfs {
     where
         P: LineProcessor,
     {
-        let mut file = self.open_proc_file(pid, b"status")?;
-        read::scan_lines(&mut file, line_processor)
+        let mut reader = self.open(pid, b"status")?;
+        read::scan_lines(&mut reader, line_processor)
     }
 
-    /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`,
-    /// where `filename` is the binary string representation of `<filename>`.
+    /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`.
+    ///
+    /// `filename` is the binary string representation of `<filename>`.
     fn read_symlink(&self, pid: u32, filename: &[u8]) -> io::Result<OsPath> {
         let mut path_buff = Self::new_path_buff();
-        let mut cursor = Cursor::new(&mut path_buff[..]);
-        self.write_proc_file_path(&mut cursor, pid, filename)?;
-        let path = CStr::from_bytes_until_nul(&path_buff)
+        // -1 ensures that at least a trailing zero will be present after the write operation.
+        let max_len = path_buff.len() - 1;
+        let written_bytes = self.write_proc_file_path(&mut path_buff[..max_len], pid, filename);
+        // +1 includes one trailing zero.
+        let path = CStr::from_bytes_until_nul(&path_buff[..written_bytes + 1])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
-            read::link(path, buff)
+            self.driver.read_symlink(&path, buff)
         })
     }
 
@@ -195,7 +256,7 @@ mod tests {
     use std::process;
 
     fn procfs() -> Procfs {
-        let mount_path = ProcfsMountPath::new(OsString::from("/proc")).unwrap();
+        let mount_path = MountPath::new(OsString::from("/proc")).unwrap();
         Procfs::new(mount_path)
     }
 
