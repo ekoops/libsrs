@@ -116,6 +116,129 @@ mod tests {
     use super::*;
     use std::io::{self, Cursor, Read};
 
+    /// A reader returning [io::Error::Interrupted] the first time `read()` is invoked.
+    struct InterruptedReader<R: Read> {
+        inner: R,
+        interrupted: bool,
+    }
+
+    impl<R: Read> Read for InterruptedReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    /// A reader that strictly reads `chunk_size` bytes at a time. This forces `exact()` to loop
+    /// multiple times to fill the buffer.
+    struct ChunkedReader<R: Read> {
+        inner: R,
+        chunk_size: usize,
+    }
+
+    impl<R: Read> Read for ChunkedReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let len = std::cmp::min(buf.len(), self.chunk_size);
+            self.inner.read(&mut buf[..len])
+        }
+    }
+
+    /// A reader that always returns an unrecoverable error.
+    struct ErrorReader;
+
+    impl Read for ErrorReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::Other, "Unrecoverable error"))
+        }
+    }
+
+    #[test]
+    fn test_exact_happy_path() {
+        let input = b"1234567890";
+        let mut reader = Cursor::new(input);
+        let mut buff = [0u8; 5];
+        let read_bytes = exact(&mut reader, &mut buff).unwrap();
+        assert_eq!(read_bytes, 5);
+        assert_eq!(&buff, b"12345");
+        assert_eq!(reader.position(), 5);
+    }
+
+    #[test]
+    fn test_exact_input_shorter_than_buff() {
+        let input = b"123";
+        let mut reader = Cursor::new(input);
+        let mut buff = [0u8; 5];
+        let read_bytes = exact(&mut reader, &mut buff).unwrap();
+        assert_eq!(read_bytes, 3);
+        assert_eq!(&buff[..3], b"123");
+        assert_eq!(buff[3], 0);
+    }
+
+    #[test]
+    fn test_exact_empty_input() {
+        let input = b"";
+        let mut reader = Cursor::new(input);
+        let mut buff = [0u8; 5];
+        let read_bytes = exact(&mut reader, &mut buff).unwrap();
+        assert_eq!(read_bytes, 0);
+    }
+
+    #[test]
+    fn test_exact_interrupted_reads() {
+        let input = b"12345";
+        let mut reader = InterruptedReader {
+            inner: Cursor::new(input),
+            interrupted: false,
+        };
+        let mut buff = [0u8; 5];
+        let read_bytes = exact(&mut reader, &mut buff).unwrap();
+        assert_eq!(read_bytes, 5);
+        assert_eq!(&buff, b"12345");
+        assert!(reader.interrupted);
+    }
+
+    #[test]
+    fn test_exact_chunked_reads() {
+        let input = b"123456";
+        let mut reader = ChunkedReader {
+            inner: Cursor::new(input),
+            chunk_size: 2,
+        };
+        let mut buff = [0u8; 6];
+        let read_bytes = exact(&mut reader, &mut buff).unwrap();
+        assert_eq!(read_bytes, 6);
+        assert_eq!(&buff, b"123456");
+    }
+
+    #[test]
+    fn test_exact_input_shorter_than_buff_chunked_reads() {
+        // Chunked reader, but runs out of data before buffer is full.
+        let input = b"123";
+        let mut reader = ChunkedReader {
+            inner: Cursor::new(input),
+            chunk_size: 1, // Read 1 byte at a time
+        };
+        let mut buff = [0u8; 5];
+
+        let n = exact(&mut reader, &mut buff).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(&buff[..3], b"123");
+    }
+
+    #[test]
+    fn test_exact_fails_on_unrecoverable_error() {
+        let mut reader = ErrorReader;
+        let mut buff = [0u8; 5];
+
+        let res = exact(&mut reader, &mut buff);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().kind(), io::ErrorKind::Other);
+    }
+
+    /// Collect all lines read from `input` into a vector of strings.
     fn collect_lines(input: &[u8]) -> io::Result<Vec<String>> {
         let mut reader = Cursor::new(input);
         let mut lines = Vec::new();
@@ -184,36 +307,15 @@ mod tests {
 
     #[test]
     fn test_scan_lines_handles_interrupted_error() {
-        /// A reader returning [io::Error::Interrupted] the first time `read()` is invoked.
-        struct InterruptedReader {
-            data: Cursor<Vec<u8>>,
-            interrupted_once: bool,
-        }
-
-        impl Read for InterruptedReader {
-            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-                if !self.interrupted_once {
-                    self.interrupted_once = true;
-                    return Err(io::Error::new(
-                        io::ErrorKind::Interrupted,
-                        "Interrupted signal",
-                    ));
-                }
-                self.data.read(buf)
-            }
-        }
-
         let input = b"line\n";
         let mut reader = InterruptedReader {
-            data: Cursor::new(input.to_vec()),
-            interrupted_once: false,
+            inner: Cursor::new(input.to_vec()),
+            interrupted: false,
         };
-
         let mut lines = Vec::new();
         let res = scan_lines(&mut reader, |line: &[u8]| {
             lines.push(String::from_utf8_lossy(line).to_string());
         });
-
         assert!(res.is_ok());
         assert_eq!(lines, vec!["line"]);
     }
