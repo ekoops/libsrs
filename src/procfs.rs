@@ -108,6 +108,28 @@ const PADDING: usize = 16;
 /// in the following way: <mount_path>/<pid>/<suffix><zero_pad>.
 const PATH_BUFF_SIZE: usize = MountPath::MAX_LEN + MAX_PID_LEN + MAX_SUFFIX_LEN + PADDING;
 
+/// The size of the stack-allocated scratch buffer used to read the content of status files (i.e.:
+/// /proc/<pid>/status).
+const STATUS_SCAN_BUFF_SIZE: usize = 4 * 1024;
+/// The size of the stack-allocated scratch buffer used to read the content of socket table files
+/// (e.g.: /proc/<pid>/net/tcp).
+const SOCKET_TABLE_SCAN_BUFF_SIZE: usize = 32 * 1024;
+
+macro_rules! scan_impl {
+    ($fn_name:ident, $path:literal, $buff_size:ident) => {
+        #[doc = concat!("Scan each line of `<procfs_mount_path>/<pid>/", $path,
+                                                    "` for `pid` and pass it to `line_processor`.")]
+        pub fn $fn_name<P>(&self, pid: u32, line_processor: P) -> io::Result<()>
+        where
+            P: LineProcessor,
+        {
+            let mut reader = self.open(pid, $path.as_bytes())?;
+            let mut buff = [0u8; $buff_size];
+            read::scan_lines(&mut reader, &mut buff, line_processor)
+        }
+    };
+}
+
 impl<D: Driver> Procfs<D> {
     /// Create a new [Procfs] instance from the specified procfs `mount_path` leveraging the
     /// specified `driver` to perform file system accesses.
@@ -237,17 +259,15 @@ impl<D: Driver> Procfs<D> {
         self.read_symlink(pid, b"root")
     }
 
-    /// Scan each line of `<procfs_mount_path>/<pid>/status` for `pid` and pass it to
-    /// `line_processor`.
-    pub fn scan_status<P>(&self, pid: u32, line_processor: P) -> io::Result<()>
-    where
-        P: LineProcessor,
-    {
-        let mut reader = self.open(pid, b"status")?;
-        const BUFFER_SIZE: usize = 4096;
-        let mut buff = [0u8; BUFFER_SIZE];
-        read::scan_lines(&mut reader, &mut buff, line_processor)
-    }
+    scan_impl!(scan_status, "status", STATUS_SCAN_BUFF_SIZE);
+    scan_impl!(scan_net_tcp, "net/tcp", SOCKET_TABLE_SCAN_BUFF_SIZE);
+    scan_impl!(scan_net_udp, "net/udp", SOCKET_TABLE_SCAN_BUFF_SIZE);
+    scan_impl!(scan_net_raw, "net/raw", SOCKET_TABLE_SCAN_BUFF_SIZE);
+    scan_impl!(scan_net_tcp6, "net/tcp6", SOCKET_TABLE_SCAN_BUFF_SIZE);
+    scan_impl!(scan_net_udp6, "net/udp6", SOCKET_TABLE_SCAN_BUFF_SIZE);
+    scan_impl!(scan_net_raw6, "net/raw6", SOCKET_TABLE_SCAN_BUFF_SIZE);
+    scan_impl!(scan_net_unix, "net/unix", SOCKET_TABLE_SCAN_BUFF_SIZE);
+    scan_impl!(scan_net_netlink, "net/netlink", SOCKET_TABLE_SCAN_BUFF_SIZE);
 }
 
 // todo: the following tests are not written well. It's just a shallow way of verifying that
