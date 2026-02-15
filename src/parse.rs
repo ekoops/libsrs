@@ -206,7 +206,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dec_hex_oct_bin_happy_path() {
+    fn test_dec_hex_oct_bin_happy_path() {
         assert_eq!(dec::<u32>(b"123").unwrap(), 123);
         assert_eq!(dec::<i32>(b"-123").unwrap(), -123);
         assert_eq!(hex::<u32>(b"abc").unwrap(), 0xabc);
@@ -218,19 +218,19 @@ mod tests {
     }
 
     #[test]
-    fn hex_case_insensitive() {
+    fn test_hex_case_insensitive() {
         assert_eq!(hex::<u32>(b"AbC").unwrap(), 0xabc);
     }
 
     #[test]
-    fn dec_hex_oct_bin_skip_leading_zeroes() {
+    fn test_dec_hex_oct_bin_skip_leading_zeroes() {
         assert_eq!(hex::<u32>(b"000abc").unwrap(), 0xabc);
         assert_eq!(oct::<u32>(b"000777").unwrap(), 0o777);
         assert_eq!(bin::<u32>(b"000101").unwrap(), 0b101);
     }
 
     #[test]
-    fn dec_hex_oct_bin_skip_leading_whitespace() {
+    fn test_dec_hex_oct_bin_skip_leading_whitespace() {
         assert_eq!(dec::<u32>(b"   123").unwrap(), 123);
         assert_eq!(dec::<u32>(b"\t\t123").unwrap(), 123);
         assert_eq!(hex::<u32>(b"   abc").unwrap(), 0xabc);
@@ -242,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn dec_hex_oct_bin_are_lenient_trailing() {
+    fn test_dec_hex_oct_bin_are_lenient_trailing() {
         assert_eq!(dec::<u32>(b"123 abc").unwrap(), 123);
         assert_eq!(dec::<u32>(b"123\n").unwrap(), 123);
         assert_eq!(hex::<u32>(b"abc abc").unwrap(), 0xabc);
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn dec_hex_oct_bin_fail() {
+    fn test_dec_hex_oct_bin_fail() {
         assert!(dec::<u32>(b"").is_err());
         assert!(dec::<u32>(b"   ").is_err());
         assert!(dec::<u32>(b"abc").is_err());
@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn dec_hex_oct_bin_strict_happy_path() {
+    fn test_dec_hex_oct_bin_strict_happy_path() {
         assert_eq!(dec_strict::<u32>(b"123").unwrap(), 123);
         assert_eq!(dec_strict::<i32>(b"-123").unwrap(), -123);
         assert_eq!(hex_strict::<u32>(b"abc").unwrap(), 0xabc);
@@ -286,19 +286,19 @@ mod tests {
     }
 
     #[test]
-    fn hex_strict_case_insensitive() {
+    fn test_hex_strict_case_insensitive() {
         assert_eq!(hex_strict::<u32>(b"AbC").unwrap(), 0xabc);
     }
 
     #[test]
-    fn dec_hex_oct_bin_strict_skip_leading_zeroes() {
+    fn test_dec_hex_oct_bin_strict_skip_leading_zeroes() {
         assert_eq!(hex_strict::<u32>(b"000abc").unwrap(), 0xabc);
         assert_eq!(oct_strict::<u32>(b"000777").unwrap(), 0o777);
         assert_eq!(bin_strict::<u32>(b"000101").unwrap(), 0b101);
     }
 
     #[test]
-    fn dec_hex_oct_bin_strict_fail_on_whitespace() {
+    fn test_dec_hex_oct_bin_strict_fail_on_whitespace() {
         assert!(dec_strict::<u32>(b"   123").is_err());
         assert!(dec_strict::<u32>(b"\t\t123").is_err());
         assert!(hex_strict::<u32>(b"   abc").is_err());
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn dec_hex_oct_bin_strict_fail_on_suffix() {
+    fn test_dec_hex_oct_bin_strict_fail_on_suffix() {
         assert!(dec_strict::<u32>(b"123kB").is_err());
         assert!(dec_strict::<u32>(b"123\n").is_err());
         assert!(hex_strict::<u32>(b"abckB").is_err());
