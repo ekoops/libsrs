@@ -271,73 +271,258 @@ impl<D: Driver> Procfs<D> {
     scan_impl!(scan_net_netlink, "net/netlink", SOCKET_TABLE_SCAN_BUFF_SIZE);
 }
 
-// todo: the following tests are not written well. It's just a shallow way of verifying that
-//   implementations don't panic on common scenarios. Add comprehensive tests.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process;
+    use std::collections::HashMap;
+    use std::io::Cursor;
 
-    fn procfs() -> Procfs {
-        let mount_path = MountPath::new(OsString::from("/proc")).unwrap();
-        Procfs::new(mount_path)
+    #[test]
+    fn test_mount_path_new_happy_path() {
+        let path = MountPath::new("/proc".into()).unwrap();
+        assert_eq!(path.0.as_bytes(), b"/proc");
     }
 
     #[test]
-    fn read_comm() {
-        let procfs = procfs();
-        let pid = process::id();
-        let _comm = procfs.read_comm(pid).unwrap();
+    fn test_mount_path_new_strips_trailing_slash() {
+        let path = MountPath::new("/proc/".into()).unwrap();
+        assert_eq!(path.0.as_bytes(), b"/proc");
     }
 
     #[test]
-    fn read_exe() {
-        let procfs = procfs();
-        let pid = process::id();
-        let _exe = procfs.read_exe(pid).unwrap();
+    fn test_mount_path_new_fails_on_empty() {
+        let err = MountPath::new("".into()).unwrap_err();
+        assert!(matches!(err, MountPathError::Empty));
     }
 
     #[test]
-    fn read_cwd() {
-        let procfs = procfs();
-        let pid = process::id();
-        let _cwd = procfs.read_cwd(pid).unwrap();
+    fn test_mount_path_new_fails_on_too_long() {
+        let long_path = "a".repeat(MountPath::MAX_LEN + 1);
+        let err = MountPath::new(long_path.into()).unwrap_err();
+        assert!(matches!(err, MountPathError::TooLong));
     }
 
     #[test]
-    fn read_root() {
-        let procfs = procfs();
-        let pid = process::id();
-        let _root = procfs.read_root(pid).unwrap();
+    fn test_mount_path_new_fails_on_nul_byte() {
+        let err = MountPath::new("/proc\0".into()).unwrap_err();
+        assert!(matches!(err, MountPathError::NulError(..)));
     }
 
-    #[test]
-    fn read_loginuid() {
-        let procfs = procfs();
-        let pid = process::id();
-        let _loginuid = procfs.read_loginuid(pid).unwrap() as i32;
+    /// A mock implementation of [Driver] that serves data from memory.
+    #[derive(Default)]
+    struct MockDriver {
+        /// Map full file paths (bytes) to file content.
+        files: HashMap<Vec<u8>, Vec<u8>>,
+        /// Map full symlink paths (bytes) to target paths.
+        symlinks: HashMap<Vec<u8>, Vec<u8>>,
     }
 
-    #[test]
-    fn read_cmdline() {
-        let procfs = procfs();
-        let pid = process::id();
-        let _cmdline = procfs.read_cmdline(pid).unwrap();
-    }
-
-    #[test]
-    fn scan_status() {
-        let procfs = procfs();
-        let pid = process::id();
-        struct Counter {
-            counter: usize,
+    impl MockDriver {
+        fn new() -> Self {
+            Self::default()
         }
-        impl LineProcessor for &mut Counter {
-            fn process(&mut self, _: &[u8]) {
-                self.counter += 1;
+
+        fn add_file(&mut self, path: impl Into<Vec<u8>>, content: impl Into<Vec<u8>>) {
+            self.files.insert(path.into(), content.into());
+        }
+
+        fn add_symlink(&mut self, path: impl Into<Vec<u8>>, target: impl Into<Vec<u8>>) {
+            self.symlinks.insert(path.into(), target.into());
+        }
+    }
+
+    impl Driver for MockDriver {
+        type Reader = Cursor<Vec<u8>>;
+
+        fn open(&self, path: &[u8]) -> io::Result<Self::Reader> {
+            match self.files.get(path) {
+                Some(content) => Ok(Cursor::new(content.clone())),
+                None => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Mock file not found: {:?}", String::from_utf8_lossy(path)),
+                )),
             }
         }
-        let mut counter = Counter { counter: 0 };
-        procfs.scan_status(pid, &mut counter).unwrap();
+
+        fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
+            let path_bytes = path.to_bytes();
+            match self.symlinks.get(path_bytes) {
+                Some(target) => {
+                    if target.len() > buff.len() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "Mock symlink target too long for buffer",
+                        ));
+                    }
+                    buff[..target.len()].copy_from_slice(target);
+                    Ok(target.len())
+                }
+                None => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Mock symlink not found: {:?}", path),
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_comm_strips_newline() {
+        let mut driver = MockDriver::new();
+        driver.add_file(b"/proc/100/comm", b"content\n");
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let comm = procfs.read_comm(100).unwrap();
+        assert_eq!(comm.as_os_str(), OsStr::new("content"));
+    }
+
+    #[test]
+    fn test_read_comm_no_newline() {
+        let mut driver = MockDriver::new();
+        driver.add_file(b"/proc/100/comm", b"content");
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let comm = procfs.read_comm(100).unwrap();
+        assert_eq!(comm.as_os_str(), OsStr::new("content"));
+    }
+
+    #[test]
+    fn test_read_comm_truncates_too_long() {
+        let mut driver = MockDriver::new();
+        let long_comm = b"very_long_process_comm_that_truncates\n";
+        driver.add_file(b"/proc/100/comm", long_comm);
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let comm = procfs.read_comm(100).unwrap();
+        let comm_str = comm.as_os_str().to_string_lossy();
+        assert_eq!(comm_str.len(), Comm::MAX_LEN);
+        let truncated_comm = String::from_utf8_lossy(&long_comm[..Comm::MAX_LEN]);
+        assert_eq!(comm_str, truncated_comm);
+    }
+
+    #[test]
+    fn test_read_cmdline_happy_path() {
+        let mut driver = MockDriver::new();
+        let content = b"argv0\0argv1\0";
+        driver.add_file(b"/proc/100/cmdline", content);
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let cmdline = procfs.read_cmdline(100).unwrap();
+        assert_eq!(cmdline.as_bytes(), content);
+    }
+
+    #[test]
+    fn test_read_environ_happy_path() {
+        let mut driver = MockDriver::new();
+        let content = b"FOO=BAR\0BAZ=QUX\0";
+        driver.add_file(b"/proc/100/environ", content);
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let env = procfs.read_environ(100).unwrap();
+        assert_eq!(env.as_bytes(), content);
+    }
+
+    #[test]
+    fn test_read_loginuid_happy_path() {
+        let mut driver = MockDriver::new();
+        driver.add_file(b"/proc/100/loginuid", b"1000");
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        assert_eq!(procfs.read_loginuid(100).unwrap(), 1000);
+    }
+
+    #[test]
+    fn test_read_loginuid_strips_newline() {
+        let mut driver = MockDriver::new();
+        driver.add_file(b"/proc/100/loginuid", b"1000\n");
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        assert_eq!(procfs.read_loginuid(100).unwrap(), 1000);
+    }
+
+    #[test]
+    fn test_read_loginuid_fails_on_non_numeric() {
+        let mut driver = MockDriver::new();
+        driver.add_file(b"/proc/100/loginuid", b"invalid");
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        assert!(procfs.read_loginuid(100).is_err());
+    }
+
+    #[test]
+    fn test_symlink_reads_happy_path() {
+        let mut driver = MockDriver::new();
+        let symlinks: Vec<(
+            &[u8],
+            &str,
+            fn(&Procfs<MockDriver>, u32) -> io::Result<OsPath>,
+        )> = vec![
+            (b"/proc/100/exe", "target_exe", Procfs::read_exe),
+            (b"/proc/100/cwd", "target_cwd", Procfs::read_cwd),
+            (b"/proc/100/root", "target_root", Procfs::read_root),
+        ];
+        for (path, target, _) in &symlinks {
+            driver.add_symlink(*path, *target);
+        }
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        for (_, expected_target, get_target) in &symlinks {
+            let target = get_target(&procfs, 100).unwrap();
+            assert_eq!(target.as_os_str(), OsStr::new(expected_target));
+        }
+    }
+
+    #[test]
+    fn test_symlink_reads_fail_on_not_found() {
+        let driver = MockDriver::new();
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let get_target_helpers: Vec<fn(&Procfs<MockDriver>, u32) -> io::Result<OsPath>> =
+            vec![Procfs::read_exe, Procfs::read_cwd, Procfs::read_root];
+        for get_target in get_target_helpers {
+            let err = get_target(&procfs, 100).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        }
+    }
+
+    #[test]
+    fn test_scans_happy_path() {
+        struct Collector {
+            lines: Vec<String>,
+        }
+        impl LineProcessor for &mut Collector {
+            fn process(&mut self, line: &[u8]) {
+                self.lines.push(String::from_utf8_lossy(line).into_owned());
+            }
+        }
+
+        macro_rules! check {
+            ($method:ident, $rel_path:expr, $content:expr, $expected:expr) => {{
+                let mut driver = MockDriver::new();
+                let mut path = b"/proc/100/".to_vec();
+                path.extend($rel_path);
+                driver.add_file(path, $content);
+                let mount_path = MountPath::new("/proc".into()).unwrap();
+                let procfs = Procfs::new_with_driver(mount_path, driver);
+                let mut collector = Collector { lines: Vec::new() };
+                procfs.$method(100, &mut collector).unwrap();
+
+                assert_eq!(
+                    collector.lines.as_slice(),
+                    $expected,
+                    "Mismatch for {}",
+                    String::from_utf8_lossy($rel_path)
+                );
+            }};
+        }
+
+        check!(scan_status, b"status", "status\ntrunc", ["status"]);
+        check!(scan_net_tcp, b"net/tcp", "tcp\ntrunc", ["tcp"]);
+        check!(scan_net_udp, b"net/udp", "udp\ntrunc", ["udp"]);
+        check!(scan_net_raw, b"net/raw", "raw\ntrunc", ["raw"]);
+        check!(scan_net_tcp6, b"net/tcp6", "tcp6\ntrunc", ["tcp6"]);
+        check!(scan_net_udp6, b"net/udp6", "udp6\ntrunc", ["udp6"]);
+        check!(scan_net_raw6, b"net/raw6", "raw6\ntrunc", ["raw6"]);
+        check!(scan_net_unix, b"net/unix", "unix\ntrunc", ["unix"]);
+        check!(scan_net_netlink, b"net/netlink", "nl\ntrunc", ["nl"]);
     }
 }
