@@ -17,6 +17,9 @@ const TASK_COMM_LEN: usize = 16;
 pub struct Comm([u8; TASK_COMM_LEN]);
 
 impl Comm {
+    /// Max allowed process command length.
+    pub const MAX_LEN: usize = TASK_COMM_LEN - 1;
+
     pub fn as_os_str(&self) -> &OsStr {
         let len = self.0[0] as usize;
         OsStr::from_bytes(&self.0[1..1 + len])
