@@ -6,7 +6,7 @@ use std::ops::Deref;
 use std::os::unix::ffi::OsStringExt;
 
 /// An [OsString] with a maximum length equal to [MAX_LEN].
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CappedOsString<const MAX_LEN: usize>(OsString);
 
 impl<const MAX_LEN: usize> FromBufferWriter<u8> for CappedOsString<MAX_LEN> {

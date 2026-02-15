@@ -13,7 +13,7 @@ const TASK_COMM_LEN: usize = 16;
 
 /// Represent the `comm` value for a task. It is encoded as a pascal string of maximum
 /// [TASK_COMM_LEN] - 1 bytes.
-#[derive(Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct Comm([u8; TASK_COMM_LEN]);
 
 impl Comm {
@@ -36,7 +36,7 @@ impl FromBufferWriter<u8> for Comm {
 }
 
 /// A wrapper around [PathBuf] representing a path with a max length of [OsPath::MAX_LEN].
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct OsPath(PathBuf);
 
 impl OsPath {
@@ -72,7 +72,7 @@ const MAX_ENVIRON_LEN: usize = 4096;
 
 /// A wrapper around [CappedOsString<MAX_ENVIRON_LEN>] representing the environ content for a
 /// process.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Environ(CappedOsString<MAX_ENVIRON_LEN>);
 
 impl FromBufferWriter<u8> for Environ {
@@ -94,7 +94,7 @@ const MAX_CMDLINE_LEN: usize = 4096;
 
 /// A wrapper around [CappedOsString<MAX_CMDLINE_LEN>] representing the cmdline content for a
 /// process.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Cmdline(CappedOsString<MAX_CMDLINE_LEN>);
 
 impl FromBufferWriter<u8> for Cmdline {
@@ -120,7 +120,7 @@ const MAX_PID_NS_LEVEL: usize = 32;
 ///
 /// The IDs are ordered from the one in outermost PID namespace to the one in the innermost one. The
 /// maximum number of IDs is capped by the Linux kernel's `MAX_PID_NS_LEVEL` value, fixed at 32.
-#[derive(Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct PidNamespaceIds {
     ids: [u32; MAX_PID_NS_LEVEL],
     len: u8,
@@ -280,7 +280,7 @@ impl TaskProcfsStatus {
 
 /// Represent a Linux task.
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Task {
     comm: Comm,
     exe: OsPath,

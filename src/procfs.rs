@@ -21,6 +21,7 @@ pub enum MountPathError {
 }
 
 /// A procfs mount path with a max length of [MountPath::MAX_LEN].
+#[derive(Debug)]
 pub struct MountPath(CString);
 
 impl MountPath {
