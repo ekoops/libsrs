@@ -4,9 +4,9 @@ use crate::task::{Cmdline, Comm, Environ, OsPath};
 use crate::{parse, read};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
-use std::fs::File;
-use std::io;
+use std::fs::{DirEntry, File};
 use std::os::unix::ffi::OsStrExt;
+use std::{fs, io};
 use thiserror::Error;
 
 /// Error returned by [MountPath::new].
@@ -47,18 +47,32 @@ impl MountPath {
 }
 
 /// An abstraction for filesystem accesses required by [Procfs].
+///
+/// This allows to easily mock file system accesses in tests.
 pub trait Driver {
     type Reader: io::Read;
+    type DirEntry;
 
     /// Create a [Self::Reader] for `path`.
     ///
     /// `path` is the non-NUL-terminated binary string representation of a file path.
     fn open(&self, path: &[u8]) -> io::Result<Self::Reader>;
 
-    /// Return the content of the symbolic link at `path` and store it in `buff`.
+    /// Read the content of the symbolic link at `path` and store it in `buff`.
     ///
-    /// `path` is the NUL-terminated binary string representation of a file path.
+    /// Return the number of bytes read. `path` is the NUL-terminated binary string representation
+    /// of a file path.
     fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize>;
+
+    /// Iterate over the entries of the directory at `path`, executing `process` for each entry.
+    ///
+    /// `path` is the non-NUL-terminated binary string representation of a directory path.
+    ///
+    /// The `process` closure can return an [io::Result] to handle errors or abort the iteration
+    /// early.
+    fn scan_dir<P>(&self, path: &[u8], process: P) -> io::Result<()>
+    where
+        P: FnMut(&Self::DirEntry) -> io::Result<()>;
 }
 
 /// The canonical [Driver] implementation.
@@ -66,6 +80,7 @@ pub struct RealDriver;
 
 impl Driver for RealDriver {
     type Reader = File;
+    type DirEntry = DirEntry;
 
     #[inline(always)]
     fn open(&self, path: &[u8]) -> io::Result<Self::Reader> {
@@ -76,6 +91,19 @@ impl Driver for RealDriver {
     #[inline(always)]
     fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
         read::link(path, buff)
+    }
+
+    #[inline(always)]
+    fn scan_dir<P>(&self, path: &[u8], mut process: P) -> io::Result<()>
+    where
+        P: FnMut(&Self::DirEntry) -> io::Result<()>,
+    {
+        let path = OsStr::from_bytes(path);
+        for dir_entry in fs::read_dir(path)? {
+            let dir_entry = dir_entry?;
+            process(&dir_entry)?;
+        }
+        Ok(())
     }
 }
 
@@ -188,6 +216,24 @@ impl<D: Driver> Procfs<D> {
         let written_bytes = self.write_proc_file_path(&mut path_buff[..], pid, filename);
         let path = &path_buff[..written_bytes];
         self.driver.open(path)
+    }
+
+    /// Iterate over the entries in `<procfs_mount_path>/<pid>/<dirname>`.
+    ///
+    /// `dirname` is the binary string representation of the subdirectory (e.g., `b"fd"`).
+    /// The `process` callback is invoked for each directory entry found.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be opened or if the callback returns an error.
+    pub fn scan_dir<P>(&self, pid: u32, dirname: &[u8], process: P) -> io::Result<()>
+    where
+        P: FnMut(&D::DirEntry) -> io::Result<()>,
+    {
+        let mut path_buff = Self::new_path_buff();
+        let written_bytes = self.write_proc_file_path(&mut path_buff[..], pid, dirname);
+        let path = &path_buff[..written_bytes];
+        self.driver.scan_dir(path, process)
     }
 
     /// Return the content read from `<procfs_mount_path>/<pid>/comm` for `pid`.
@@ -308,6 +354,13 @@ mod tests {
         assert!(matches!(err, MountPathError::NulError(..)));
     }
 
+    /// A mock implementation of [DirEntry].
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    struct MockDirEntry {
+        file_name: OsString,
+        ino: u64,
+    }
+
     /// A mock implementation of [Driver] that serves data from memory.
     #[derive(Default)]
     struct MockDriver {
@@ -315,6 +368,8 @@ mod tests {
         files: HashMap<Vec<u8>, Vec<u8>>,
         /// Map full symlink paths (bytes) to target paths.
         symlinks: HashMap<Vec<u8>, Vec<u8>>,
+        /// Map full directory paths (bytes) to lists of directory entries.
+        dir_entries: HashMap<Vec<u8>, Vec<MockDirEntry>>,
     }
 
     impl MockDriver {
@@ -329,10 +384,16 @@ mod tests {
         fn add_symlink(&mut self, path: impl Into<Vec<u8>>, target: impl Into<Vec<u8>>) {
             self.symlinks.insert(path.into(), target.into());
         }
+
+        fn add_dir_entry(&mut self, path: impl Into<Vec<u8>>, dir_entry: MockDirEntry) {
+            let list = self.dir_entries.entry(path.into()).or_insert(Vec::new());
+            list.push(dir_entry);
+        }
     }
 
     impl Driver for MockDriver {
         type Reader = Cursor<Vec<u8>>;
+        type DirEntry = MockDirEntry;
 
         fn open(&self, path: &[u8]) -> io::Result<Self::Reader> {
             match self.files.get(path) {
@@ -362,6 +423,26 @@ mod tests {
                     format!("Mock symlink not found: {:?}", path),
                 )),
             }
+        }
+
+        fn scan_dir<P>(&self, path: &[u8], mut process: P) -> io::Result<()>
+        where
+            P: FnMut(&Self::DirEntry) -> io::Result<()>,
+        {
+            let Some(dir_entries) = self.dir_entries.get(path) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "Mock dir entries not found: {:?}",
+                        String::from_utf8_lossy(path)
+                    ),
+                ));
+            };
+
+            for dir_entry in dir_entries {
+                process(dir_entry)?;
+            }
+            Ok(())
         }
     }
 
@@ -542,5 +623,25 @@ mod tests {
         check!(scan_net_raw6, b"net/raw6", "raw6\ntrunc", ["raw6"]);
         check!(scan_net_unix, b"net/unix", "unix\ntrunc", ["unix"]);
         check!(scan_net_netlink, b"net/netlink", "nl\ntrunc", ["nl"]);
+    }
+
+    #[test]
+    fn test_scan_dir_happy_path() {
+        let mut driver = MockDriver::new();
+        let dir_entry = MockDirEntry {
+            file_name: OsString::from("0"),
+            ino: 12345,
+        };
+        driver.add_dir_entry(b"/proc/100/fd", dir_entry.clone());
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let mut entries = Vec::new();
+        procfs
+            .scan_dir(100, b"fd", |entry| {
+                entries.push(entry.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(entries, vec![dir_entry]);
     }
 }
