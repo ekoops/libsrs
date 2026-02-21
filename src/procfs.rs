@@ -107,7 +107,7 @@ impl Driver for RealDriver {
     }
 }
 
-/// A helper type allowing to extract data from procfs. If unspecified, it leverages [ReadDriver]
+/// A helper type allowing to extract data from procfs. If unspecified, it leverages [RealDriver]
 /// for filesystem accesses.
 pub struct Procfs<D: Driver = RealDriver> {
     mount_path: MountPath,

@@ -9,7 +9,9 @@ use std::ops::Deref;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 
-const TASK_COMM_LEN: usize = 16;
+/// The maximum length (including the trailing NUL terminator) of the internal C string
+/// representation of a Linux task command.
+pub const TASK_COMM_LEN: usize = 16;
 
 /// Represent the `comm` value for a task. It is encoded as a pascal string of maximum
 /// [TASK_COMM_LEN] - 1 bytes.
@@ -44,7 +46,7 @@ pub struct OsPath(PathBuf);
 
 impl OsPath {
     /// Max path length.
-    const MAX_LEN: usize = 4096;
+    pub const MAX_LEN: usize = 4096;
 
     pub fn as_os_str(&self) -> &OsStr {
         self.0.as_os_str()

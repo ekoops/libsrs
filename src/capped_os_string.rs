@@ -5,7 +5,7 @@ use std::io;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStringExt;
 
-/// An [OsString] with a maximum length equal to [MAX_LEN].
+/// An [OsString] with a maximum length equal to `MAX_LEN`.
 #[derive(Debug, Clone, Default)]
 pub struct CappedOsString<const MAX_LEN: usize>(OsString);
 
