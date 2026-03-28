@@ -4,8 +4,9 @@ use crate::task::{Cmdline, Comm, Environ, OsPath};
 use crate::{parse, read};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
-use std::fs::{DirEntry, File};
+use std::fs::{DirEntry, File, Metadata};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::{fs, io};
 use thiserror::Error;
 
@@ -52,6 +53,7 @@ impl MountPath {
 pub trait Driver {
     type Reader: io::Read;
     type DirEntry;
+    type Metadata: MetadataExt;
 
     /// Create a [Self::Reader] for `path`.
     ///
@@ -63,6 +65,11 @@ pub trait Driver {
     /// Return the number of bytes read. `path` is the NUL-terminated binary string representation
     /// of a file path.
     fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize>;
+
+    /// Return metadata associated with `path`.
+    ///
+    /// `path` is the non-NUL-terminated binary string representation of a file path.
+    fn get_metadata(&self, path: &[u8]) -> io::Result<Self::Metadata>;
 
     /// Iterate over the entries of the directory at `path`, executing `process` for each entry.
     ///
@@ -81,6 +88,7 @@ pub struct RealDriver;
 impl Driver for RealDriver {
     type Reader = File;
     type DirEntry = DirEntry;
+    type Metadata = Metadata;
 
     #[inline(always)]
     fn open(&self, path: &[u8]) -> io::Result<Self::Reader> {
@@ -91,6 +99,12 @@ impl Driver for RealDriver {
     #[inline(always)]
     fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
         read::link(path, buff)
+    }
+
+    #[inline(always)]
+    fn get_metadata(&self, path: &[u8]) -> io::Result<Metadata> {
+        let path = OsStr::from_bytes(path);
+        fs::metadata(path)
     }
 
     #[inline(always)]
@@ -218,6 +232,16 @@ impl<D: Driver> Procfs<D> {
         self.driver.open(path)
     }
 
+    /// Return metadata associated with `<procfs_mount_path>/<pid>/<path>`.
+    ///
+    /// `path` is the binary string representation of `<path>`.
+    fn get_metadata(&self, pid: u32, path: &[u8]) -> io::Result<D::Metadata> {
+        let mut path_buff = Self::new_path_buff();
+        let written_bytes = self.write_proc_file_path(&mut path_buff[..], pid, path);
+        let path = &path_buff[..written_bytes];
+        self.driver.get_metadata(path)
+    }
+
     /// Iterate over the entries in `<procfs_mount_path>/<pid>/<dirname>`.
     ///
     /// `dirname` is the binary string representation of the subdirectory (e.g., `b"fd"`).
@@ -273,6 +297,12 @@ impl<D: Driver> Procfs<D> {
             read_bytes -= 1;
         }
         parse::dec_strict(&buff[..read_bytes])
+    }
+
+    /// Return the inode number of `<procfs_mount_path>/<pid>/ns/net` for `pid`.
+    pub fn read_netns_ino(&self, pid: u32) -> io::Result<u64> {
+        let metadata = self.get_metadata(pid, b"ns/net")?;
+        Ok(metadata.ino())
     }
 
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`.
@@ -361,6 +391,35 @@ mod tests {
         ino: u64,
     }
 
+    /// A mock implementation of [Metadata].
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    struct MockMetadata {
+        ino: u64,
+    }
+
+    macro_rules! unimplemented_metadata_methods {
+        ($($name:ident -> $ret:ty),*) => {
+            $(
+                fn $name(&self) -> $ret {
+                    unimplemented!(concat!(stringify!($name),
+                        " is not implemented for MockMetadata"))
+                }
+            )*
+        };
+    }
+    impl MetadataExt for MockMetadata {
+        fn ino(&self) -> u64 {
+            self.ino
+        }
+
+        // Generate the rest in a single line
+        unimplemented_metadata_methods!(
+            dev -> u64, mode -> u32, nlink -> u64, uid -> u32, gid -> u32, rdev -> u64, size -> u64,
+            atime -> i64, atime_nsec -> i64, mtime -> i64, mtime_nsec -> i64, ctime -> i64,
+            ctime_nsec -> i64, blksize -> u64, blocks -> u64
+        );
+    }
+
     /// A mock implementation of [Driver] that serves data from memory.
     #[derive(Default)]
     struct MockDriver {
@@ -370,6 +429,8 @@ mod tests {
         symlinks: HashMap<Vec<u8>, Vec<u8>>,
         /// Map full directory paths (bytes) to lists of directory entries.
         dir_entries: HashMap<Vec<u8>, Vec<MockDirEntry>>,
+        /// Map full file paths (bytes) to file metadata.
+        metadatas: HashMap<Vec<u8>, MockMetadata>,
     }
 
     impl MockDriver {
@@ -385,6 +446,10 @@ mod tests {
             self.symlinks.insert(path.into(), target.into());
         }
 
+        fn add_metadata(&mut self, path: impl Into<Vec<u8>>, metadata: MockMetadata) {
+            self.metadatas.insert(path.into(), metadata);
+        }
+
         fn add_dir_entry(&mut self, path: impl Into<Vec<u8>>, dir_entry: MockDirEntry) {
             let list = self.dir_entries.entry(path.into()).or_insert(Vec::new());
             list.push(dir_entry);
@@ -394,6 +459,7 @@ mod tests {
     impl Driver for MockDriver {
         type Reader = Cursor<Vec<u8>>;
         type DirEntry = MockDirEntry;
+        type Metadata = MockMetadata;
 
         fn open(&self, path: &[u8]) -> io::Result<Self::Reader> {
             match self.files.get(path) {
@@ -421,6 +487,19 @@ mod tests {
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("Mock symlink not found: {:?}", path),
+                )),
+            }
+        }
+
+        fn get_metadata(&self, path: &[u8]) -> io::Result<Self::Metadata> {
+            match self.metadatas.get(path) {
+                Some(content) => Ok(content.clone()),
+                None => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "Mock metadata not found: {:?}",
+                        String::from_utf8_lossy(path)
+                    ),
                 )),
             }
         }
@@ -545,6 +624,25 @@ mod tests {
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
         assert!(procfs.read_loginuid(100).is_err());
+    }
+
+    #[test]
+    fn test_read_netns_ino_happy_path() {
+        let mut driver = MockDriver::new();
+        let ino = 1234;
+        driver.add_metadata(b"/proc/100/ns/net", MockMetadata { ino });
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        assert_eq!(procfs.read_netns_ino(100).unwrap(), ino);
+    }
+
+    #[test]
+    fn test_read_netns_ino_fails_on_not_found() {
+        let driver = MockDriver::new();
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let err = procfs.read_netns_ino(100).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
