@@ -43,7 +43,7 @@ where
 ///
 /// # Behavior
 ///
-/// * **Buffer Limit:** The length of `buff` determines the maximum allowed line length. 
+/// * **Buffer Limit:** The length of `buff` determines the maximum allowed line length.
 /// * **Interruption:** Errors of kind [`io::ErrorKind::Interrupted`] are automatically retried.
 /// * **Partial Lines:** Any data at the end of the stream that is not terminated by a newline
 ///   is **discarded** and not passed to the processor.
@@ -100,7 +100,22 @@ where
     }
 }
 
-/// Read the content of the symbolic link `path` into `buff`. Return the amount of data read.
+/// Read the target of the symbolic link at `path` into `buff`, returning the strictly positive
+/// number of bytes written.
+///
+/// This is a thin wrapper around [`libc::readlink`]. The result is **not** null-terminated.
+///
+/// # Truncation
+///
+/// If the link target is longer than `buff.len()`, the target is silently truncated to fit. Callers
+/// that need to detect truncation should check whether the returned length equals `buff.len()` and
+/// retry with a larger buffer.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] (sourced from [`io::Error::last_os_error`]) if the underlying
+/// [`libc::readlink`] call fails (e.g. `path` does not exist, is not a symbolic link, `buff.len()`
+/// is zero, or a permission error occurs).
 pub fn link(path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
     let ret = unsafe {
         libc::readlink(
@@ -109,7 +124,7 @@ pub fn link(path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
             buff.len(),
         )
     };
-    if ret < 0 {
+    if ret <= 0 {
         return Err(io::Error::last_os_error());
     }
 
