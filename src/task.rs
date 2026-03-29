@@ -6,8 +6,7 @@ use std::cmp;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::ops::Deref;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::PathBuf;
+use std::os::unix::ffi::OsStrExt;
 
 /// The maximum length (including the trailing NUL terminator) of the internal C string
 /// representation of a Linux task command.
@@ -40,33 +39,22 @@ impl FromBufferWriter<u8> for Comm {
     }
 }
 
-/// A wrapper around [PathBuf] representing a path with a max length of [OsPath::MAX_LEN].
+pub const MAX_PATH_LEN: usize = 4096;
+
+/// A wrapper around [CappedOsString<MAX_PATH_LEN>] representing a path with a max length of
+/// [MAX_PATH_LEN].
 #[derive(Debug, Clone, Default)]
-pub struct OsPath(PathBuf);
-
-impl OsPath {
-    /// Max path length.
-    pub const MAX_LEN: usize = 4096;
-
-    pub fn as_os_str(&self) -> &OsStr {
-        self.0.as_os_str()
-    }
-}
+pub struct OsPath(CappedOsString<MAX_PATH_LEN>);
 
 impl FromBufferWriter<u8> for OsPath {
     fn from_buffer_writer<W: BufferWriter<u8>>(writer: W) -> io::Result<Self> {
-        let mut buff = vec![0u8; Self::MAX_LEN];
-        let written_bytes = writer.write(&mut buff)?;
-        // Cap written bytes to be sure it is not bigger than buffer size.
-        let written_bytes = cmp::min(written_bytes, buff.len());
-        buff.truncate(written_bytes);
-        let os_string = OsString::from_vec(buff);
-        Ok(Self(PathBuf::from(os_string)))
+        let capped_os_string = CappedOsString::from_buffer_writer(writer)?;
+        Ok(Self(capped_os_string))
     }
 }
 
 impl Deref for OsPath {
-    type Target = PathBuf;
+    type Target = OsString;
 
     fn deref(&self) -> &Self::Target {
         &self.0
