@@ -105,7 +105,7 @@ pub fn link(path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
     let ret = unsafe {
         libc::readlink(
             path.as_ptr() as *const c_char,
-            buff.as_ptr() as *mut c_char,
+            buff.as_mut_ptr() as *mut c_char,
             buff.len(),
         )
     };
