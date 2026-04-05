@@ -1,6 +1,6 @@
 use crate::buffer_writer::{BufferWriter, FromBufferWriter};
 use std::cmp;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStringExt;
@@ -8,6 +8,26 @@ use std::os::unix::ffi::OsStringExt;
 /// An [OsString] with a maximum length equal to `MAX_LEN`.
 #[derive(Debug, Clone, Default)]
 pub struct CappedOsString<const MAX_LEN: usize>(OsString);
+
+/// Error returned by [CappedOsString::new].
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("string length {actual_len} exceeds maximum {max_len}")]
+pub struct OsStringTooLongError {
+    actual_len: usize,
+    max_len: usize,
+}
+
+impl<const MAX_LEN: usize> CappedOsString<MAX_LEN> {
+    /// Creates a new [CappedOsString] from any [AsRef<OsStr>].
+    pub fn new<T: AsRef<OsStr>>(s: T) -> Result<Self, OsStringTooLongError> {
+        let s = s.as_ref();
+        let len = s.len();
+        if len > MAX_LEN {
+            return Err(OsStringTooLongError { actual_len: len, max_len: MAX_LEN});
+        }
+        Ok(Self(OsString::from(s)))
+    }
+}
 
 impl<const MAX_LEN: usize> FromBufferWriter<u8> for CappedOsString<MAX_LEN> {
     #[inline]
