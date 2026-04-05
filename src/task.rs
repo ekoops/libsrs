@@ -1,5 +1,5 @@
 use crate::buffer_writer::{BufferWriter, FromBufferWriter};
-use crate::capped_os_string::CappedOsString;
+use crate::capped_os_string::{CappedOsString, OsStringTooLongError};
 use crate::parse;
 use crate::procfs::Procfs;
 use std::cmp;
@@ -7,6 +7,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 /// The maximum length (including the trailing NUL terminator) of the internal C string
 /// representation of a Linux task command.
@@ -45,6 +46,19 @@ pub const MAX_PATH_LEN: usize = 4096;
 /// [MAX_PATH_LEN].
 #[derive(Debug, Clone, Default)]
 pub struct OsPath(CappedOsString<MAX_PATH_LEN>);
+
+/// Error returned by [OsPath::new].
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("path too long: {0}")]
+pub struct OsPathTooLongError(#[from] OsStringTooLongError);
+
+impl OsPath {
+    /// Creates a new [OsPath] from any [AsRef<Path>].
+    pub fn new<T: AsRef<Path>>(t: T) -> Result<Self, OsPathTooLongError> {
+        let capped_os_string = CappedOsString::new(t.as_ref())?;
+        Ok(Self(capped_os_string))
+    }
+}
 
 impl FromBufferWriter<u8> for OsPath {
     fn from_buffer_writer<W: BufferWriter<u8>>(writer: W) -> io::Result<Self> {
