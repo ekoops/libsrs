@@ -5,7 +5,7 @@ use crate::procfs::Procfs;
 use std::cmp;
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::ops::Deref;
+use std::ops::{ControlFlow, Deref};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -211,9 +211,11 @@ impl TaskProcfsStatus {
     }
 
     /// Parse a single line from procfs' status file and updates the corresponding field.
-    fn update_from_line(&mut self, line: &[u8]) -> io::Result<()> {
+    fn update_from_line(&mut self, line: &[u8]) -> io::Result<ControlFlow<()>> {
+        // todo(ekoops): early-terminate in case we already have all information.
+
         let Some(&first_char) = line.first() else {
-            return Ok(());
+            return Ok(ControlFlow::Continue(()));
         };
 
         match first_char {
@@ -240,7 +242,7 @@ impl TaskProcfsStatus {
             }
             b'C' => {
                 let Some(line) = line.strip_prefix(b"Cap") else {
-                    return Ok(());
+                    return Ok(ControlFlow::Continue(()));
                 };
                 if let Some(line) = line.strip_prefix(b"Inh:") {
                     self.cap_inh = parse::hex(line)?;
@@ -257,7 +259,7 @@ impl TaskProcfsStatus {
             }
             b'V' => {
                 let Some(line) = line.strip_prefix(b"Vm") else {
-                    return Ok(());
+                    return Ok(ControlFlow::Continue(()));
                 };
                 if let Some(line) = line.strip_prefix(b"Size:") {
                     self.vm_size_kb = parse::dec(line)?;
@@ -269,7 +271,7 @@ impl TaskProcfsStatus {
             }
             b'N' => {
                 let Some(line) = line.strip_prefix(b"NS") else {
-                    return Ok(());
+                    return Ok(ControlFlow::Continue(()));
                 };
                 if let Some(mut line) = line.strip_prefix(b"pid:") {
                     self.ns_pids = Self::parse_pids_from_line(&mut line)?;
@@ -279,9 +281,9 @@ impl TaskProcfsStatus {
                     self.ns_tgids = Self::parse_pids_from_line(&mut line)?;
                 }
             }
-            _ => return Ok(()),
+            _ => return Ok(ControlFlow::Continue(())),
         };
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 }
 
@@ -322,8 +324,7 @@ impl Task {
     pub fn from_procfs(procfs: &Procfs, pid: u32) -> io::Result<Self> {
         let mut procfs_status = TaskProcfsStatus::default();
         procfs.scan_status(pid, |line: &[u8]| {
-            // todo: extend LineProcessor to allow to return an io::Result
-            procfs_status.update_from_line(line).unwrap()
+            procfs_status.update_from_line(line)
         })?;
         let task = Self {
             comm: procfs.read_comm(pid)?,

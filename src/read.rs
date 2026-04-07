@@ -1,6 +1,7 @@
 use libc::c_char;
 use std::ffi::CStr;
 use std::io::{self, Read};
+use std::ops::ControlFlow;
 
 /// Fill `buff` with data read from `reader`. Returns the amount `n` of bytes read from `reader`,
 /// such that `0` <= `n` <= `buff.len()`. `n` < `buff.len()` only if the end-of-file is reached
@@ -22,16 +23,18 @@ pub fn exact<R: Read>(reader: &mut R, buff: &mut [u8]) -> io::Result<usize> {
 
 /// An abstraction for types that can process lines of data.
 pub trait LineProcessor {
-    /// Process a line of data.
-    fn process(&mut self, line: &[u8]);
+    /// Processes a line of data.
+    ///
+    /// The returned value can be used to control the flow of execution.
+    fn process(&mut self, line: &[u8]) -> io::Result<ControlFlow<()>>;
 }
 
 /// Blanket implementation allowing the use of closures as [LineProcessor].
 impl<F> LineProcessor for F
 where
-    F: FnMut(&[u8]),
+    F: FnMut(&[u8]) -> io::Result<ControlFlow<()>>,
 {
-    fn process(&mut self, line: &[u8]) {
+    fn process(&mut self, line: &[u8]) -> io::Result<ControlFlow<()>> {
         self(line)
     }
 }
@@ -47,12 +50,15 @@ where
 /// * **Interruption:** Errors of kind [`io::ErrorKind::Interrupted`] are automatically retried.
 /// * **Partial Lines:** Any data at the end of the stream that is not terminated by a newline
 ///   is **discarded** and not passed to the processor.
+/// * **Early Termination:** `line_processor` can request for early termination by returning
+///   `Ok(ControlFlow::Break(())`.
 ///
 /// # Errors
 ///
 /// Returns an [`io::Error`] if:
 /// * A line is longer than `buff.len()` (returns [`io::ErrorKind::InvalidData`]).
 /// * The underlying reader returns a non-recoverable error.
+/// * `line_processor` returns an error.
 pub fn scan_lines<R, P>(reader: &mut R, buff: &mut [u8], mut line_processor: P) -> io::Result<()>
 where
     R: Read,
@@ -80,7 +86,9 @@ where
 
             // Strip the trailing '\n' from chunk and pass the resulting line to the processor.
             let line = &chunk[..chunk.len() - 1];
-            line_processor.process(line);
+            if let ControlFlow::Break(_) = line_processor.process(line)? {
+                return Ok(());
+            }
             processed_data_len += chunk.len();
         }
 
@@ -261,17 +269,30 @@ mod tests {
     /// The size of the scratch buffer provided to `scan_lines()`.
     const SCRATCH_BUFF_SIZE: usize = 4096;
 
-    /// Collect all lines read from `input` into a vector of strings.
-    fn collect_lines(input: &[u8]) -> io::Result<Vec<String>> {
+    /// Collects first `n` lines read from `input` (or all, if `input` has fewer lines) into a vector
+    /// of strings.
+    fn collect_first_n_lines(input: &[u8], n: usize) -> io::Result<Vec<String>> {
         let mut reader = Cursor::new(input);
         let mut lines = Vec::new();
         let mut buff = [0u8; SCRATCH_BUFF_SIZE];
+        let mut counter = 0;
         scan_lines(&mut reader, &mut buff, |line: &[u8]| {
             // Convert bytes to String for easy assertion
             lines.push(String::from_utf8_lossy(line).to_string());
+            counter += 1;
+            if counter < n {
+                Ok(ControlFlow::Continue(()))
+            } else {
+                Ok(ControlFlow::Break(()))
+            }
         })?;
 
         Ok(lines)
+    }
+
+    /// Collects all lines read from `input` into a vector of strings.
+    fn collect_lines(input: &[u8]) -> io::Result<Vec<String>> {
+        collect_first_n_lines(input, usize::MAX)
     }
 
     #[test]
@@ -339,8 +360,16 @@ mod tests {
         let mut lines = Vec::new();
         let res = scan_lines(&mut reader, &mut buff, |line: &[u8]| {
             lines.push(String::from_utf8_lossy(line).to_string());
+            Ok(ControlFlow::Continue(()))
         });
         assert!(res.is_ok());
         assert_eq!(lines, vec!["line"]);
+    }
+
+    #[test]
+    fn test_scan_lines_respects_control_flow() {
+        let input = b"line1\nline2\nline3\nline4\n";
+        let lines = collect_first_n_lines(input, 2).unwrap();
+        assert_eq!(lines, vec!["line1", "line2"]);
     }
 }

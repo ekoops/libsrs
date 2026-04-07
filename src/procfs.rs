@@ -352,6 +352,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::io::Cursor;
+    use std::ops::ControlFlow;
 
     #[test]
     fn test_mount_path_new_happy_path() {
@@ -687,8 +688,9 @@ mod tests {
             lines: Vec<String>,
         }
         impl LineProcessor for &mut Collector {
-            fn process(&mut self, line: &[u8]) {
+            fn process(&mut self, line: &[u8]) -> io::Result<ControlFlow<()>> {
                 self.lines.push(String::from_utf8_lossy(line).into_owned());
+                Ok(ControlFlow::Continue(()))
             }
         }
 
