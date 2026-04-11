@@ -323,7 +323,7 @@ impl Task {
     /// Create [Self] for `pid` by gathering data from `procfs`.
     pub fn from_procfs(procfs: &Procfs, pid: u32) -> io::Result<Self> {
         let mut procfs_status = TaskProcfsStatus::default();
-        procfs.scan_status(pid, |line: &[u8]| {
+        let _cf = procfs.scan_status(pid, |line: &[u8]| {
             procfs_status.update_from_line(line)
         })?;
         let task = Self {

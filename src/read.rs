@@ -41,8 +41,9 @@ where
 
 /// Reads lines from `reader` and passes them to `line_processor`, using `buff` as a scratch buffer.
 ///
-/// This function reads data until End-of-File (EOF). Each complete line (delimited by `\n`) is
-/// passed to `line_processor` with the trailing newline character removed.
+/// This function reads data until End-of-File (EOF) or until `line_processor` requests early
+/// termination. Each complete line (delimited by `\n`) is passed to `line_processor` with the
+/// trailing newline character removed.
 ///
 /// # Behavior
 ///
@@ -50,8 +51,13 @@ where
 /// * **Interruption:** Errors of kind [`io::ErrorKind::Interrupted`] are automatically retried.
 /// * **Partial Lines:** Any data at the end of the stream that is not terminated by a newline
 ///   is **discarded** and not passed to the processor.
-/// * **Early Termination:** `line_processor` can request for early termination by returning
-///   `Ok(ControlFlow::Break(())`.
+/// * **Early Termination:** `line_processor` can stop the scan early by returning
+///   `Ok(ControlFlow::Break(()))`.
+///
+/// # Returns
+///
+/// * `Ok(ControlFlow::Continue(()))` — the scan reached EOF normally.
+/// * `Ok(ControlFlow::Break(()))` — the scan was stopped early by `line_processor`.
 ///
 /// # Errors
 ///
@@ -59,7 +65,11 @@ where
 /// * A line is longer than `buff.len()` (returns [`io::ErrorKind::InvalidData`]).
 /// * The underlying reader returns a non-recoverable error.
 /// * `line_processor` returns an error.
-pub fn scan_lines<R, P>(reader: &mut R, buff: &mut [u8], mut line_processor: P) -> io::Result<()>
+pub fn scan_lines<R, P>(
+    reader: &mut R,
+    buff: &mut [u8],
+    mut line_processor: P,
+) -> io::Result<ControlFlow<()>>
 where
     R: Read,
     P: LineProcessor,
@@ -68,7 +78,7 @@ where
     let mut bytes_in_buff = 0usize;
     loop {
         let read_bytes = match reader.read(&mut buff[bytes_in_buff..]) {
-            Ok(0) => return Ok(()),
+            Ok(0) => return Ok(ControlFlow::Continue(())),
             Ok(read_bytes) => read_bytes,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
@@ -86,8 +96,8 @@ where
 
             // Strip the trailing '\n' from chunk and pass the resulting line to the processor.
             let line = &chunk[..chunk.len() - 1];
-            if let ControlFlow::Break(_) = line_processor.process(line)? {
-                return Ok(());
+            if let ControlFlow::Break(b) = line_processor.process(line)? {
+                return Ok(ControlFlow::Break(b));
             }
             processed_data_len += chunk.len();
         }
@@ -269,15 +279,17 @@ mod tests {
     /// The size of the scratch buffer provided to `scan_lines()`.
     const SCRATCH_BUFF_SIZE: usize = 4096;
 
-    /// Collects first `n` lines read from `input` (or all, if `input` has fewer lines) into a vector
-    /// of strings.
-    fn collect_first_n_lines(input: &[u8], n: usize) -> io::Result<Vec<String>> {
-        let mut reader = Cursor::new(input);
+    /// Collects first `n` lines read from `reader` (or all, if `reader` outputs fewer lines) into a
+    /// vector of strings. Returns the vector of strings and the [`ControlFlow`] object indicating
+    /// whether the scan was interrupted after `n` lines were collected.
+    fn collect_first_n_lines_from_reader<R: Read>(
+        mut reader: R,
+        n: usize,
+    ) -> io::Result<(Vec<String>, ControlFlow<()>)> {
         let mut lines = Vec::new();
         let mut buff = [0u8; SCRATCH_BUFF_SIZE];
         let mut counter = 0;
-        scan_lines(&mut reader, &mut buff, |line: &[u8]| {
-            // Convert bytes to String for easy assertion
+        let cf = scan_lines(&mut reader, &mut buff, |line: &[u8]| {
             lines.push(String::from_utf8_lossy(line).to_string());
             counter += 1;
             if counter < n {
@@ -287,12 +299,33 @@ mod tests {
             }
         })?;
 
+        Ok((lines, cf))
+    }
+
+    /// Collects first `n` lines read from `input` (or all, if `input` has fewer lines) into a
+    /// vector of strings. Returns the vector of strings and the [`ControlFlow`] object indicating
+    /// whether the scan was interrupted after `n` lines were collected.
+    fn collect_first_n_lines(input: &[u8], n: usize) -> io::Result<(Vec<String>, ControlFlow<()>)> {
+        let reader = Cursor::new(input);
+        collect_first_n_lines_from_reader(reader, n)
+    }
+
+    /// Collects all lines read from `reader` into a vector of strings. It asserts that
+    /// [`scan_lines`] is not interrupted by the line processor.
+    fn collect_lines_from_reader<R: Read>(reader: R) -> io::Result<Vec<String>> {
+        let (lines, cw) = collect_first_n_lines_from_reader(reader, usize::MAX)?;
+        assert!(
+            cw.is_continue(),
+            "expected scan to reach EOF, but LineProcessor interrupted it"
+        );
         Ok(lines)
     }
 
-    /// Collects all lines read from `input` into a vector of strings.
+    /// Collects all lines read from `input` into a vector of strings. It asserts that
+    /// [`scan_lines`] is not interrupted by the line processor.
     fn collect_lines(input: &[u8]) -> io::Result<Vec<String>> {
-        collect_first_n_lines(input, usize::MAX)
+        let reader = Cursor::new(input);
+        collect_lines_from_reader(reader)
     }
 
     #[test]
@@ -345,31 +378,30 @@ mod tests {
     #[test]
     fn test_scan_lines_sliding_window_logic() {
         let input = b"part1 part2\n";
-        let lines = collect_lines(input).unwrap();
+        let reader = ChunkedReader {
+            inner: Cursor::new(input.to_vec()),
+            chunk_size: 5,
+        };
+        let lines = collect_lines_from_reader(reader).unwrap();
         assert_eq!(lines, vec!["part1 part2"]);
     }
 
     #[test]
     fn test_scan_lines_handles_interrupted_error() {
         let input = b"line\n";
-        let mut reader = InterruptedReader {
+        let reader = InterruptedReader {
             inner: Cursor::new(input.to_vec()),
             interrupted: false,
         };
-        let mut buff = [0u8; SCRATCH_BUFF_SIZE];
-        let mut lines = Vec::new();
-        let res = scan_lines(&mut reader, &mut buff, |line: &[u8]| {
-            lines.push(String::from_utf8_lossy(line).to_string());
-            Ok(ControlFlow::Continue(()))
-        });
-        assert!(res.is_ok());
+        let lines = collect_lines_from_reader(reader).unwrap();
         assert_eq!(lines, vec!["line"]);
     }
 
     #[test]
     fn test_scan_lines_respects_control_flow() {
         let input = b"line1\nline2\nline3\nline4\n";
-        let lines = collect_first_n_lines(input, 2).unwrap();
+        let (lines, cw) = collect_first_n_lines(input, 2).unwrap();
         assert_eq!(lines, vec!["line1", "line2"]);
+        assert!(cw.is_break());
     }
 }

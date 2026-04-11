@@ -5,6 +5,7 @@ use crate::{parse, read};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
 use std::fs::{DirEntry, File, Metadata};
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::{fs, io};
@@ -162,7 +163,7 @@ macro_rules! scan_impl {
     ($fn_name:ident, $path:literal, $buff_size:ident) => {
         #[doc = concat!("Scan each line of `<procfs_mount_path>/<pid>/", $path,
                                                     "` for `pid` and pass it to `line_processor`.")]
-        pub fn $fn_name<P>(&self, pid: u32, line_processor: P) -> io::Result<()>
+        pub fn $fn_name<P>(&self, pid: u32, line_processor: P) -> io::Result<ControlFlow<()>>
         where
             P: LineProcessor,
         {
@@ -703,7 +704,8 @@ mod tests {
                 let mount_path = MountPath::new("/proc".into()).unwrap();
                 let procfs = Procfs::new_with_driver(mount_path, driver);
                 let mut collector = Collector { lines: Vec::new() };
-                procfs.$method(100, &mut collector).unwrap();
+                let cf = procfs.$method(100, &mut collector).unwrap();
+                assert!(cf.is_continue());
 
                 assert_eq!(
                     collector.lines.as_slice(),
