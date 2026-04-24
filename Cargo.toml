@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-libc = "0.2.180"
 thiserror = "2.0.18"
 lexical-core = { version = "1.0.6", default-features = false, features = ["parse-integers", "write-integers", "power-of-two", "format"] }
+rustix = { version = "1.1.4", features = ["fs"] }
