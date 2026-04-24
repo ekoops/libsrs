@@ -5,6 +5,9 @@ use std::io;
 use std::io::Read;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
+// todo(ekoops): make it when it starts to become too leaky.
+pub type OpenFlags = OFlags;
+
 /// Invokes `openat(2)` system call.
 ///
 /// Arguments have the same semantic of the underlying system call. Returns the open file
