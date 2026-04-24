@@ -1,8 +1,10 @@
 use crate::buffer_writer::{BufferWriter, FromBufferWriter};
 use crate::capped_os_string::{CappedOsString, OsStringTooLongError};
+use crate::file::File;
 use crate::parse;
 use crate::procfs::Procfs;
 use std::cmp;
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::ops::{ControlFlow, Deref};
@@ -323,9 +325,7 @@ impl Task {
     /// Create [Self] for `pid` by gathering data from `procfs`.
     pub fn from_procfs(procfs: &Procfs, pid: u32) -> io::Result<Self> {
         let mut procfs_status = TaskProcfsStatus::default();
-        let _cf = procfs.scan_status(pid, |line: &[u8]| {
-            procfs_status.update_from_line(line)
-        })?;
+        let _cf = procfs.scan_status(pid, |line: &[u8]| procfs_status.update_from_line(line))?;
         let task = Self {
             comm: procfs.read_comm(pid)?,
             exe: procfs.read_exe(pid)?,
@@ -355,5 +355,51 @@ impl Task {
             ns_tgids: procfs_status.ns_tgids,
         };
         Ok(task)
+    }
+}
+
+/// A Linux open file and associated file descriptor.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct OpenFile {
+    fd: u32,
+    file: File,
+}
+
+impl OpenFile {
+    /// Creates a new [Self].
+    pub fn new(fd: u32, file: File) -> Self {
+        Self { fd, file }
+    }
+
+    /// Returns the file descriptor of the open file.
+    pub fn fd(&self) -> u32 {
+        self.fd
+    }
+
+    /// Returns an immutable reference to the open file.
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
+    /// Returns a mutable reference to the open file.
+    pub fn file_mut(&mut self) -> &mut File {
+        &mut self.file
+    }
+}
+
+/// A Linux open file table.
+#[derive(Debug, Clone)]
+pub struct FdTable(HashMap<u32, OpenFile>);
+
+impl FdTable {
+    /// Create a new [Self].
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    /// Insert a new open file (replacing any associated with the open file fd).
+    pub fn insert(&mut self, open_file: OpenFile) {
+        let _ = self.0.insert(open_file.fd, open_file);
     }
 }
