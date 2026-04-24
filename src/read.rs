@@ -1,4 +1,4 @@
-use libc::c_char;
+use rustix::fs::{self, CWD};
 use std::ffi::CStr;
 use std::io::{self, Read};
 use std::ops::ControlFlow;
@@ -121,7 +121,7 @@ where
 /// Read the target of the symbolic link at `path` into `buff`, returning the strictly positive
 /// number of bytes written.
 ///
-/// This is a thin wrapper around [`libc::readlink`]. The result is **not** null-terminated.
+/// This is a thin wrapper around `readlink(2)` system call. The result is **not** null-terminated.
 ///
 /// # Truncation
 ///
@@ -131,22 +131,11 @@ where
 ///
 /// # Errors
 ///
-/// Returns an [`io::Error`] (sourced from [`io::Error::last_os_error`]) if the underlying
-/// [`libc::readlink`] call fails (e.g. `path` does not exist, is not a symbolic link, `buff.len()`
-/// is zero, or a permission error occurs).
+/// Returns an [`io::Error`] (sourced from errno) if the underlying `readlink(2)` system call fails
+/// (e.g. `path` does not exist, is not a symbolic link, `buff.len()` is zero, or a permission error
+/// occurs).
 pub fn link(path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
-    let ret = unsafe {
-        libc::readlink(
-            path.as_ptr() as *const c_char,
-            buff.as_mut_ptr() as *mut c_char,
-            buff.len(),
-        )
-    };
-    if ret <= 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    Ok(ret as usize)
+    fs::readlinkat_raw(CWD, path, buff).map_err(Into::into)
 }
 
 #[cfg(test)]
