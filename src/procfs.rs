@@ -1,5 +1,5 @@
 use crate::buffer_writer::FromBufferWriter;
-use crate::fs::{DirEntry, File, Metadata};
+use crate::fs::{DirEntry, File, Metadata, MetadataExt};
 use crate::read::LineProcessor;
 use crate::task::{Cmdline, Comm, Environ, OsPath};
 use crate::{fs, parse, read};
@@ -8,7 +8,6 @@ use std::ffi::{CStr, CString, NulError, OsString};
 use std::io;
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use thiserror::Error;
 
 /// Error returned by [MountPath::new].
@@ -65,9 +64,7 @@ pub trait Driver {
     fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize>;
 
     /// Return metadata associated with `path`.
-    ///
-    /// `path` is the non-NUL-terminated binary string representation of a file path.
-    fn get_metadata(&self, path: &[u8]) -> io::Result<Self::Metadata>;
+    fn get_metadata(&self, path: &CStr) -> io::Result<Self::Metadata>;
 
     /// Iterate over the entries of the directory at `path`, executing `process` for each entry.
     ///
@@ -99,7 +96,7 @@ impl Driver for RealDriver {
     }
 
     #[inline(always)]
-    fn get_metadata(&self, path: &[u8]) -> io::Result<Metadata> {
+    fn get_metadata(&self, path: &CStr) -> io::Result<Metadata> {
         fs::metadata(path)
     }
 
@@ -244,7 +241,7 @@ impl<D: Driver> Procfs<D> {
     fn get_metadata(&self, pid: u32, path: &[u8]) -> io::Result<D::Metadata> {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, path)?;
-        self.driver.get_metadata(path.to_bytes())
+        self.driver.get_metadata(path)
     }
 
     /// Iterate over the entries in `<procfs_mount_path>/<pid>/<dirname>`.
@@ -398,27 +395,10 @@ mod tests {
         ino: u64,
     }
 
-    macro_rules! unimplemented_metadata_methods {
-        ($($name:ident -> $ret:ty),*) => {
-            $(
-                fn $name(&self) -> $ret {
-                    unimplemented!(concat!(stringify!($name),
-                        " is not implemented for MockMetadata"))
-                }
-            )*
-        };
-    }
     impl MetadataExt for MockMetadata {
         fn ino(&self) -> u64 {
             self.ino
         }
-
-        // Generate the rest in a single line
-        unimplemented_metadata_methods!(
-            dev -> u64, mode -> u32, nlink -> u64, uid -> u32, gid -> u32, rdev -> u64, size -> u64,
-            atime -> i64, atime_nsec -> i64, mtime -> i64, mtime_nsec -> i64, ctime -> i64,
-            ctime_nsec -> i64, blksize -> u64, blocks -> u64
-        );
     }
 
     /// A mock implementation of [Driver] that serves data from memory.
@@ -464,7 +444,7 @@ mod tests {
 
         fn open(&self, path: &CStr) -> io::Result<Self::Reader> {
             let path_bytes = path.to_bytes();
-            match self.files.get(&path_bytes.to_vec()) {
+            match self.files.get(path_bytes) {
                 Some(content) => Ok(Cursor::new(content.clone())),
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -496,14 +476,15 @@ mod tests {
             }
         }
 
-        fn get_metadata(&self, path: &[u8]) -> io::Result<Self::Metadata> {
-            match self.metadatas.get(path) {
+        fn get_metadata(&self, path: &CStr) -> io::Result<Self::Metadata> {
+            let path_bytes = path.to_bytes();
+            match self.metadatas.get(path_bytes) {
                 Some(content) => Ok(content.clone()),
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
                         "Mock metadata not found: {:?}",
-                        String::from_utf8_lossy(path)
+                        String::from_utf8_lossy(path_bytes)
                     ),
                 )),
             }

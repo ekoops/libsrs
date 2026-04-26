@@ -1,10 +1,8 @@
-use rustix::fs;
-use rustix::fs::{Dir, Mode, OFlags, CWD};
-use std::ffi::{CStr, OsStr};
+use rustix::fs::{self, Dir, Mode, OFlags, Stat, CWD};
+use std::ffi::CStr;
 use std::fs as std_fs;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
-use std::os::unix::ffi::OsStrExt;
 
 pub type File = std_fs::File;
 
@@ -57,14 +55,25 @@ pub fn readlink(path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
     readlinkat(CWD, path, buff)
 }
 
-pub type Metadata = std_fs::Metadata;
+/// File metadata.
+pub struct Metadata(Stat);
+
+/// Unix-specific extensions to [`Metadata`].
+pub trait MetadataExt {
+    /// Returns the inode number.
+    fn ino(&self) -> u64;
+}
+
+impl MetadataExt for Metadata {
+    fn ino(&self) -> u64 {
+        self.0.st_ino
+    }
+}
 
 /// Return metadata associated with `path`.
-///
-/// `path` is the non-NUL-terminated binary string representation of a file path.
-pub fn metadata(path: &[u8]) -> io::Result<Metadata> {
-    let path = OsStr::from_bytes(path);
-    std_fs::metadata(path)
+pub fn metadata(path: &CStr) -> io::Result<Metadata> {
+    let stat = fs::stat(path)?;
+    Ok(Metadata(stat))
 }
 
 pub struct DirEntry<'a> {
