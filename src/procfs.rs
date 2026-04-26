@@ -72,7 +72,7 @@ pub trait Driver {
     ///
     /// The `process` closure can return an [io::Result] to handle errors or abort the iteration
     /// early.
-    fn scan_dir<P>(&self, path: &[u8], process: P) -> io::Result<()>
+    fn scan_dir<P>(&self, path: &CStr, process: P) -> io::Result<()>
     where
         P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>;
 }
@@ -101,7 +101,7 @@ impl Driver for RealDriver {
     }
 
     #[inline(always)]
-    fn scan_dir<P>(&self, path: &[u8], process: P) -> io::Result<()>
+    fn scan_dir<P>(&self, path: &CStr, process: P) -> io::Result<()>
     where
         P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>,
     {
@@ -244,21 +244,20 @@ impl<D: Driver> Procfs<D> {
         self.driver.get_metadata(path)
     }
 
-    /// Iterate over the entries in `<procfs_mount_path>/<pid>/<dirname>`.
+    /// Iterates over the entries of `<procfs_mount_path>/<pid>/fd`.
     ///
-    /// `dirname` is the binary string representation of the subdirectory (e.g., `b"fd"`).
-    /// The `process` callback is invoked for each directory entry found.
+    /// The `process` callback is invoked for each directory entry found, expect `.` and `..`.
     ///
     /// # Errors
     ///
     /// Returns an error if the directory cannot be opened or if the callback returns an error.
-    pub fn scan_dir<P>(&self, pid: u32, dirname: &[u8], process: P) -> io::Result<()>
+    pub fn scan_fd_dir<P>(&self, pid: u32, process: P) -> io::Result<()>
     where
         P: FnMut(&D::DirEntry<'_>) -> io::Result<()>,
     {
         let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid, dirname)?;
-        self.driver.scan_dir(path.to_bytes(), process)
+        let path = self.write_proc_file_path(&mut path_buff, pid, b"fd")?;
+        self.driver.scan_dir(path, process)
     }
 
     /// Return the content read from `<procfs_mount_path>/<pid>/comm` for `pid`.
@@ -490,16 +489,17 @@ mod tests {
             }
         }
 
-        fn scan_dir<P>(&self, path: &[u8], mut process: P) -> io::Result<()>
+        fn scan_dir<P>(&self, path: &CStr, mut process: P) -> io::Result<()>
         where
             P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>,
         {
-            let Some(dir_entries) = self.dir_entries.get(path) else {
+            let path_bytes = path.to_bytes();
+            let Some(dir_entries) = self.dir_entries.get(path_bytes) else {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
                         "Mock dir entries not found: {:?}",
-                        String::from_utf8_lossy(path)
+                        String::from_utf8_lossy(path_bytes)
                     ),
                 ));
             };
@@ -723,7 +723,7 @@ mod tests {
         let procfs = Procfs::new_with_driver(mount_path, driver);
         let mut entries = Vec::new();
         procfs
-            .scan_dir(100, b"fd", |entry| {
+            .scan_fd_dir(100, |entry| {
                 entries.push(entry.clone());
                 Ok(())
             })

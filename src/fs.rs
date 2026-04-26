@@ -2,15 +2,27 @@ use rustix::fs::{self, Dir, Mode, OFlags, Stat, CWD};
 use std::ffi::CStr;
 use std::fs as std_fs;
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 pub type File = std_fs::File;
+
+/// Invokes `openat(2)` system call.
+///
+/// Arguments have the same semantic of the underlying system call. Returns the open file
+/// descriptor.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] (sourced from errno) if the underlying `openat(2)` system call fails.
+fn openat<Fd: AsFd>(fd: Fd, path: &CStr, flags: OFlags, mode: Mode) -> io::Result<OwnedFd> {
+    fs::openat(fd, path, flags, mode).map_err(Into::into)
+}
 
 /// Create a [File] for `path`.
 ///
 /// The file is opened read-only.
 pub fn open_rd(path: &CStr) -> io::Result<File> {
-    let fd = fs::open(path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
+    let fd = openat(CWD, path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
     Ok(File::from(fd))
 }
 
@@ -87,18 +99,16 @@ impl<'a> DirEntry<'a> {
     }
 }
 
-/// Iterate over the entries of the directory at `path`, executing `process` for each entry.
+/// Iterates over the entries of the directory at `path`, executing `process` for each entry.
 ///
-/// `path` is the non-NUL-terminated binary string representation of a directory path.
+/// Entries for the current and parent directories (typically `.` and `..`) are skipped.
 ///
-/// The `process` closure can return an [io::Result] to handle errors or abort the iteration
-/// early.
-pub fn scan_dir<P>(path: &[u8], mut process: P) -> io::Result<()>
+/// The `process` closure can return an [io::Result] to handle errors or abort the iteration early.
+pub fn scan_dir<P>(path: &CStr, mut process: P) -> io::Result<()>
 where
     P: FnMut(&DirEntry<'_>) -> io::Result<()>,
 {
-    // todo(ekoops): passing path as &[u8] leads to allocation.
-    let dir_fd = fs::openat(
+    let dir_fd = openat(
         CWD,
         path,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
