@@ -1,14 +1,14 @@
 use crate::buffer_writer::FromBufferWriter;
+use crate::fs::{DirEntry, File, Metadata};
 use crate::read::LineProcessor;
 use crate::task::{Cmdline, Comm, Environ, OsPath};
-use crate::{parse, read};
+use crate::{fs, parse, read};
 use lexical_core::FormattedSize;
-use std::ffi::{CStr, CString, NulError, OsStr, OsString};
-use std::fs::{DirEntry, File, Metadata};
+use std::ffi::{CStr, CString, NulError, OsString};
+use std::io;
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::{fs, io};
 use thiserror::Error;
 
 /// Error returned by [MountPath::new].
@@ -53,7 +53,7 @@ impl MountPath {
 /// This allows to easily mock file system accesses in tests.
 pub trait Driver {
     type Reader: io::Read;
-    type DirEntry;
+    type DirEntry<'a>;
     type Metadata: MetadataExt;
 
     /// Create a [Self::Reader] for `path`.
@@ -63,8 +63,7 @@ pub trait Driver {
 
     /// Read the content of the symbolic link at `path` and store it in `buff`.
     ///
-    /// Return the number of bytes read. `path` is the NUL-terminated binary string representation
-    /// of a file path.
+    /// Return the number of bytes read.
     fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize>;
 
     /// Return metadata associated with `path`.
@@ -80,7 +79,7 @@ pub trait Driver {
     /// early.
     fn scan_dir<P>(&self, path: &[u8], process: P) -> io::Result<()>
     where
-        P: FnMut(&Self::DirEntry) -> io::Result<()>;
+        P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>;
 }
 
 /// The canonical [Driver] implementation.
@@ -88,37 +87,30 @@ pub struct RealDriver;
 
 impl Driver for RealDriver {
     type Reader = File;
-    type DirEntry = DirEntry;
+    type DirEntry<'a> = DirEntry<'a>;
     type Metadata = Metadata;
 
     #[inline(always)]
     fn open(&self, path: &[u8]) -> io::Result<Self::Reader> {
-        let path = OsStr::from_bytes(path);
-        File::open(path)
+        fs::open(path)
     }
 
     #[inline(always)]
     fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
-        read::link(path, buff)
+        fs::readlink(path, buff)
     }
 
     #[inline(always)]
     fn get_metadata(&self, path: &[u8]) -> io::Result<Metadata> {
-        let path = OsStr::from_bytes(path);
         fs::metadata(path)
     }
 
     #[inline(always)]
-    fn scan_dir<P>(&self, path: &[u8], mut process: P) -> io::Result<()>
+    fn scan_dir<P>(&self, path: &[u8], process: P) -> io::Result<()>
     where
-        P: FnMut(&Self::DirEntry) -> io::Result<()>,
+        P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>,
     {
-        let path = OsStr::from_bytes(path);
-        for dir_entry in fs::read_dir(path)? {
-            let dir_entry = dir_entry?;
-            process(&dir_entry)?;
-        }
-        Ok(())
+        fs::scan_dir(path, process)
     }
 }
 
@@ -253,7 +245,7 @@ impl<D: Driver> Procfs<D> {
     /// Returns an error if the directory cannot be opened or if the callback returns an error.
     pub fn scan_dir<P>(&self, pid: u32, dirname: &[u8], process: P) -> io::Result<()>
     where
-        P: FnMut(&D::DirEntry) -> io::Result<()>,
+        P: FnMut(&D::DirEntry<'_>) -> io::Result<()>,
     {
         let mut path_buff = Self::new_path_buff();
         let written_bytes = self.write_proc_file_path(&mut path_buff[..], pid, dirname);
@@ -352,6 +344,7 @@ impl<D: Driver> Procfs<D> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::ffi::OsStr;
     use std::io::Cursor;
     use std::ops::ControlFlow;
 
@@ -460,7 +453,7 @@ mod tests {
 
     impl Driver for MockDriver {
         type Reader = Cursor<Vec<u8>>;
-        type DirEntry = MockDirEntry;
+        type DirEntry<'a> = MockDirEntry;
         type Metadata = MockMetadata;
 
         fn open(&self, path: &[u8]) -> io::Result<Self::Reader> {
@@ -508,7 +501,7 @@ mod tests {
 
         fn scan_dir<P>(&self, path: &[u8], mut process: P) -> io::Result<()>
         where
-            P: FnMut(&Self::DirEntry) -> io::Result<()>,
+            P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>,
         {
             let Some(dir_entries) = self.dir_entries.get(path) else {
                 return Err(io::Error::new(

@@ -118,26 +118,6 @@ where
     }
 }
 
-/// Read the target of the symbolic link at `path` into `buff`, returning the strictly positive
-/// number of bytes written.
-///
-/// This is a thin wrapper around `readlink(2)` system call. The result is **not** null-terminated.
-///
-/// # Truncation
-///
-/// If the link target is longer than `buff.len()`, the target is silently truncated to fit. Callers
-/// that need to detect truncation should check whether the returned length equals `buff.len()` and
-/// retry with a larger buffer.
-///
-/// # Errors
-///
-/// Returns an [`io::Error`] (sourced from errno) if the underlying `readlink(2)` system call fails
-/// (e.g. `path` does not exist, is not a symbolic link, `buff.len()` is zero, or a permission error
-/// occurs).
-pub fn link(path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
-    fs::readlinkat_raw(CWD, path, buff).map_err(Into::into)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
