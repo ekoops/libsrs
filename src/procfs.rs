@@ -56,30 +56,23 @@ pub trait Driver {
     type DirEntry;
     type Metadata: MetadataExt;
 
-    /// Create a [Self::Reader] for `path`.
-    ///
-    /// `path` is the non-NUL-terminated binary string representation of a file path.
-    fn open(&self, path: &[u8]) -> io::Result<Self::Reader>;
+    /// Creates a [Self::Reader] for `path`.
+    fn open(&self, path: &CStr) -> io::Result<Self::Reader>;
 
-    /// Read the content of the symbolic link at `path` and store it in `buff`.
+    /// Reads the content of the symbolic link at `path` and store it in `buff`.
     ///
-    /// Return the number of bytes read. `path` is the NUL-terminated binary string representation
-    /// of a file path.
+    /// Returns the number of bytes read.
     fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize>;
 
-    /// Return metadata associated with `path`.
-    ///
-    /// `path` is the non-NUL-terminated binary string representation of a file path.
-    fn get_metadata(&self, path: &[u8]) -> io::Result<Self::Metadata>;
+    /// Returns metadata associated with `path`.
+    fn get_metadata(&self, path: &CStr) -> io::Result<Self::Metadata>;
 
     /// Iterates over the entries of the directory at `path`, executing `process` for each entry but
     /// `.` and `..`.
     ///
-    /// `path` is the non-NUL-terminated binary string representation of a directory path.
-    ///
     /// The `process` closure can return an [io::Result] to handle errors or abort the iteration
     /// early.
-    fn scan_dir<P>(&self, path: &[u8], process: P) -> io::Result<()>
+    fn scan_dir<P>(&self, path: &CStr, process: P) -> io::Result<()>
     where
         P: FnMut(&Self::DirEntry) -> io::Result<()>;
 }
@@ -93,8 +86,8 @@ impl Driver for RealDriver {
     type Metadata = Metadata;
 
     #[inline(always)]
-    fn open(&self, path: &[u8]) -> io::Result<Self::Reader> {
-        let path = OsStr::from_bytes(path);
+    fn open(&self, path: &CStr) -> io::Result<Self::Reader> {
+        let path = OsStr::from_bytes(path.to_bytes());
         File::open(path)
     }
 
@@ -104,17 +97,17 @@ impl Driver for RealDriver {
     }
 
     #[inline(always)]
-    fn get_metadata(&self, path: &[u8]) -> io::Result<Metadata> {
-        let path = OsStr::from_bytes(path);
+    fn get_metadata(&self, path: &CStr) -> io::Result<Metadata> {
+        let path = OsStr::from_bytes(path.to_bytes());
         fs::metadata(path)
     }
 
     #[inline(always)]
-    fn scan_dir<P>(&self, path: &[u8], mut process: P) -> io::Result<()>
+    fn scan_dir<P>(&self, path: &CStr, mut process: P) -> io::Result<()>
     where
         P: FnMut(&Self::DirEntry) -> io::Result<()>,
     {
-        let path = OsStr::from_bytes(path);
+        let path = OsStr::from_bytes(path.to_bytes());
         for dir_entry in fs::read_dir(path)? {
             let dir_entry = dir_entry?;
             process(&dir_entry)?;
@@ -213,9 +206,9 @@ impl<D: Driver> Procfs<D> {
         written_bytes
     }
 
-    /// Write the mount path, `pid` and `filename` into `buff`, separating them with `/`s, and
-    /// return the number of bytes written.
-    fn write_proc_file_path(&self, mut buff: &mut [u8], pid: u32, filename: &[u8]) -> usize {
+    /// Writes the mount path, `pid` and `filename` into `buff`, separating them with `/`s, and
+    /// returns the number of bytes written.
+    fn write_proc_file_path_impl(&self, mut buff: &mut [u8], pid: u32, filename: &[u8]) -> usize {
         let mut written_bytes = Self::write_bytes(&mut buff, self.mount_path.0.as_bytes());
         written_bytes += Self::write_bytes(&mut buff, b"/");
         written_bytes += Self::write_pid(&mut buff, pid);
@@ -224,23 +217,37 @@ impl<D: Driver> Procfs<D> {
         written_bytes
     }
 
-    /// Create a reader for `<procfs_mount_path>/<pid>/<filename>`.
+    /// Writes the mount path, `pid` and `filename` into `buff`, separating them with `/`s, and
+    /// returns a [CStr] view of it.
+    fn write_proc_file_path<'a>(
+        &self,
+        buff: &'a mut [u8],
+        pid: u32,
+        filename: &[u8],
+    ) -> io::Result<&'a CStr> {
+        // -1 ensures that at least a trailing zero will be present after the write operation.
+        let max_len = buff.len() - 1;
+        let written_bytes = self.write_proc_file_path_impl(&mut buff[..max_len], pid, filename);
+        // +1 includes one trailing zero.
+        CStr::from_bytes_until_nul(&buff[..written_bytes + 1])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+    }
+
+    /// Creates a reader for `<procfs_mount_path>/<pid>/<filename>`.
     ///
     /// `filename` is the binary string representation of `<filename>`.
     fn open(&self, pid: u32, filename: &[u8]) -> io::Result<D::Reader> {
         let mut path_buff = Self::new_path_buff();
-        let written_bytes = self.write_proc_file_path(&mut path_buff[..], pid, filename);
-        let path = &path_buff[..written_bytes];
+        let path = self.write_proc_file_path(&mut path_buff, pid, filename)?;
         self.driver.open(path)
     }
 
-    /// Return metadata associated with `<procfs_mount_path>/<pid>/<path>`.
+    /// Returns metadata associated with `<procfs_mount_path>/<pid>/<path>`.
     ///
     /// `path` is the binary string representation of `<path>`.
     fn get_metadata(&self, pid: u32, path: &[u8]) -> io::Result<D::Metadata> {
         let mut path_buff = Self::new_path_buff();
-        let written_bytes = self.write_proc_file_path(&mut path_buff[..], pid, path);
-        let path = &path_buff[..written_bytes];
+        let path = self.write_proc_file_path(&mut path_buff, pid, path)?;
         self.driver.get_metadata(path)
     }
 
@@ -256,8 +263,7 @@ impl<D: Driver> Procfs<D> {
         P: FnMut(&D::DirEntry) -> io::Result<()>,
     {
         let mut path_buff = Self::new_path_buff();
-        let written_bytes = self.write_proc_file_path(&mut path_buff[..], pid, b"fd");
-        let path = &path_buff[..written_bytes];
+        let path = self.write_proc_file_path(&mut path_buff, pid, b"fd")?;
         self.driver.scan_dir(path, process)
     }
 
@@ -306,19 +312,14 @@ impl<D: Driver> Procfs<D> {
         Ok(metadata.ino())
     }
 
-    /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`.
+    /// Returns the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`.
     ///
     /// `filename` is the binary string representation of `<filename>`.
     fn read_symlink(&self, pid: u32, filename: &[u8]) -> io::Result<OsPath> {
         let mut path_buff = Self::new_path_buff();
-        // -1 ensures that at least a trailing zero will be present after the write operation.
-        let max_len = path_buff.len() - 1;
-        let written_bytes = self.write_proc_file_path(&mut path_buff[..max_len], pid, filename);
-        // +1 includes one trailing zero.
-        let path = CStr::from_bytes_until_nul(&path_buff[..written_bytes + 1])
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let path = self.write_proc_file_path(&mut path_buff, pid, filename)?;
         OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
-            self.driver.read_symlink(&path, buff)
+            self.driver.read_symlink(path, buff)
         })
     }
 
@@ -463,12 +464,16 @@ mod tests {
         type DirEntry = MockDirEntry;
         type Metadata = MockMetadata;
 
-        fn open(&self, path: &[u8]) -> io::Result<Self::Reader> {
-            match self.files.get(path) {
+        fn open(&self, path: &CStr) -> io::Result<Self::Reader> {
+            let path_bytes = path.to_bytes();
+            match self.files.get(path_bytes) {
                 Some(content) => Ok(Cursor::new(content.clone())),
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("Mock file not found: {:?}", String::from_utf8_lossy(path)),
+                    format!(
+                        "Mock file not found: {:?}",
+                        String::from_utf8_lossy(path_bytes)
+                    ),
                 )),
             }
         }
@@ -493,29 +498,31 @@ mod tests {
             }
         }
 
-        fn get_metadata(&self, path: &[u8]) -> io::Result<Self::Metadata> {
-            match self.metadatas.get(path) {
+        fn get_metadata(&self, path: &CStr) -> io::Result<Self::Metadata> {
+            let path_bytes = path.to_bytes();
+            match self.metadatas.get(path_bytes) {
                 Some(content) => Ok(content.clone()),
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
                         "Mock metadata not found: {:?}",
-                        String::from_utf8_lossy(path)
+                        String::from_utf8_lossy(path_bytes)
                     ),
                 )),
             }
         }
 
-        fn scan_dir<P>(&self, path: &[u8], mut process: P) -> io::Result<()>
+        fn scan_dir<P>(&self, path: &CStr, mut process: P) -> io::Result<()>
         where
             P: FnMut(&Self::DirEntry) -> io::Result<()>,
         {
-            let Some(dir_entries) = self.dir_entries.get(path) else {
+            let path_bytes = path.to_bytes();
+            let Some(dir_entries) = self.dir_entries.get(path_bytes) else {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
                         "Mock dir entries not found: {:?}",
-                        String::from_utf8_lossy(path)
+                        String::from_utf8_lossy(path_bytes)
                     ),
                 ));
             };
