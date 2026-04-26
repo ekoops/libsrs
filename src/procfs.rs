@@ -161,7 +161,16 @@ macro_rules! scan_impl {
         where
             P: LineProcessor,
         {
-            let mut reader = self.open(pid, $path.as_bytes())?;
+            const _: () = {
+                assert!($path.len() <= MAX_SUFFIX_LEN, concat!("Path '", $path, "' exceeds ",
+                    stringify!(MAX_SUFFIX_LEN)));
+            };
+            // Convert path to &CStr at compile time.
+            const PATH_CSTR: &CStr = match CStr::from_bytes_with_nul(concat!($path, "\0").as_bytes()) {
+                Ok(cstr) => cstr,
+                Err(_) => panic!(concat!("path '", $path, "' contains interior null bytes")),
+            };
+            let mut reader = self.open(pid, PATH_CSTR)?;
             let mut buff = [0u8; $buff_size];
             read::scan_lines(&mut reader, &mut buff, line_processor)
         }
@@ -207,36 +216,29 @@ impl<D: Driver> Procfs<D> {
     }
 
     /// Writes the mount path, `pid` and `filename` into `buff`, separating them with `/`s, and
-    /// returns the number of bytes written.
-    fn write_proc_file_path_impl(&self, mut buff: &mut [u8], pid: u32, filename: &[u8]) -> usize {
+    /// and returns a [CStr] view of it.
+    fn write_proc_file_path<'a>(
+        &self,
+        path_buff: &'a mut [u8],
+        pid: u32,
+        filename: &CStr,
+    ) -> io::Result<&'a CStr> {
+        let mut buff = &mut path_buff[..];
         let mut written_bytes = Self::write_bytes(&mut buff, self.mount_path.0.as_bytes());
         written_bytes += Self::write_bytes(&mut buff, b"/");
         written_bytes += Self::write_pid(&mut buff, pid);
         written_bytes += Self::write_bytes(&mut buff, b"/");
-        written_bytes += Self::write_bytes(&mut buff, filename);
-        written_bytes
-    }
-
-    /// Writes the mount path, `pid` and `filename` into `buff`, separating them with `/`s, and
-    /// returns a [CStr] view of it.
-    fn write_proc_file_path<'a>(
-        &self,
-        buff: &'a mut [u8],
-        pid: u32,
-        filename: &[u8],
-    ) -> io::Result<&'a CStr> {
-        // -1 ensures that at least a trailing zero will be present after the write operation.
-        let max_len = buff.len() - 1;
-        let written_bytes = self.write_proc_file_path_impl(&mut buff[..max_len], pid, filename);
-        // +1 includes one trailing zero.
-        CStr::from_bytes_until_nul(&buff[..written_bytes + 1])
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+        written_bytes += Self::write_bytes(&mut buff, filename.to_bytes_with_nul());
+        // SAFETY: Self::write_bytes(..., filename.to_bytes_with_nul()) guarantees that a trailing
+        // NUL byte is written into the buffer.
+        let path = unsafe { CStr::from_bytes_with_nul_unchecked(&path_buff[..written_bytes]) };
+        Ok(path)
     }
 
     /// Creates a reader for `<procfs_mount_path>/<pid>/<filename>`.
     ///
     /// `filename` is the binary string representation of `<filename>`.
-    fn open(&self, pid: u32, filename: &[u8]) -> io::Result<D::Reader> {
+    fn open(&self, pid: u32, filename: &CStr) -> io::Result<D::Reader> {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, filename)?;
         self.driver.open(path)
@@ -245,7 +247,7 @@ impl<D: Driver> Procfs<D> {
     /// Returns metadata associated with `<procfs_mount_path>/<pid>/<path>`.
     ///
     /// `path` is the binary string representation of `<path>`.
-    fn get_metadata(&self, pid: u32, path: &[u8]) -> io::Result<D::Metadata> {
+    fn get_metadata(&self, pid: u32, path: &CStr) -> io::Result<D::Metadata> {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, path)?;
         self.driver.get_metadata(path)
@@ -263,13 +265,13 @@ impl<D: Driver> Procfs<D> {
         P: FnMut(&D::DirEntry) -> io::Result<()>,
     {
         let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid, b"fd")?;
+        let path = self.write_proc_file_path(&mut path_buff, pid, c"fd")?;
         self.driver.scan_dir(path, process)
     }
 
     /// Return the content read from `<procfs_mount_path>/<pid>/comm` for `pid`.
     pub fn read_comm(&self, pid: u32) -> io::Result<Comm> {
-        let mut reader = self.open(pid, b"comm")?;
+        let mut reader = self.open(pid, c"comm")?;
         Comm::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
             let mut read_bytes = read::exact(&mut reader, buff)?;
             if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
@@ -281,7 +283,7 @@ impl<D: Driver> Procfs<D> {
 
     /// Return the content read from `<procfs_mount_path>/<pid>/environ` for `pid`.
     pub fn read_environ(&self, pid: u32) -> io::Result<Environ> {
-        let mut reader = self.open(pid, b"environ")?;
+        let mut reader = self.open(pid, c"environ")?;
         Environ::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
             read::exact(&mut reader, buff)
         })
@@ -289,7 +291,7 @@ impl<D: Driver> Procfs<D> {
 
     /// Return the content read from `<procfs_mount_path>/<pid>/cmdline` for `pid`.
     pub fn read_cmdline(&self, pid: u32) -> io::Result<Cmdline> {
-        let mut reader = self.open(pid, b"cmdline")?;
+        let mut reader = self.open(pid, c"cmdline")?;
         Cmdline::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
             read::exact(&mut reader, buff)
         })
@@ -297,7 +299,7 @@ impl<D: Driver> Procfs<D> {
 
     /// Return the content read from `<procfs_mount_path>/<pid>/loginuid` for `pid`.
     pub fn read_loginuid(&self, pid: u32) -> io::Result<u32> {
-        let mut reader = self.open(pid, b"loginuid")?;
+        let mut reader = self.open(pid, c"loginuid")?;
         let mut buff = [0u8; u32::FORMATTED_SIZE_DECIMAL];
         let mut read_bytes = read::exact(&mut reader, &mut buff)?;
         if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
@@ -308,14 +310,14 @@ impl<D: Driver> Procfs<D> {
 
     /// Return the inode number of `<procfs_mount_path>/<pid>/ns/net` for `pid`.
     pub fn read_netns_ino(&self, pid: u32) -> io::Result<u64> {
-        let metadata = self.get_metadata(pid, b"ns/net")?;
+        let metadata = self.get_metadata(pid, c"ns/net")?;
         Ok(metadata.ino())
     }
 
     /// Returns the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`.
     ///
     /// `filename` is the binary string representation of `<filename>`.
-    fn read_symlink(&self, pid: u32, filename: &[u8]) -> io::Result<OsPath> {
+    fn read_symlink(&self, pid: u32, filename: &CStr) -> io::Result<OsPath> {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, filename)?;
         OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
@@ -325,17 +327,17 @@ impl<D: Driver> Procfs<D> {
 
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/exe` for `pid`.
     pub fn read_exe(&self, pid: u32) -> io::Result<OsPath> {
-        self.read_symlink(pid, b"exe")
+        self.read_symlink(pid, c"exe")
     }
 
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/cwd` for `pid`.
     pub fn read_cwd(&self, pid: u32) -> io::Result<OsPath> {
-        self.read_symlink(pid, b"cwd")
+        self.read_symlink(pid, c"cwd")
     }
 
     /// Return the content of the symbolic link `<procfs_mount_path>/<pid>/root` for `pid`.
     pub fn read_root(&self, pid: u32) -> io::Result<OsPath> {
-        self.read_symlink(pid, b"root")
+        self.read_symlink(pid, c"root")
     }
 
     scan_impl!(scan_status, "status", STATUS_SCAN_BUFF_SIZE);
