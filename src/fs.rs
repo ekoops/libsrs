@@ -10,10 +10,10 @@ pub type File = std_fs::File;
 
 /// Create a [File] for `path`.
 ///
-/// `path` is the non-NUL-terminated binary string representation of a file path.
-pub fn open(path: &[u8]) -> io::Result<File> {
-    let path = OsStr::from_bytes(path);
-    File::open(path)
+/// The file is opened read-only.
+pub fn open_rd(path: &CStr) -> io::Result<File> {
+    let fd = fs::open(path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
+    Ok(File::from(fd))
 }
 
 /// Read the target of the symbolic link at `path` into `buff`, returning the strictly positive
