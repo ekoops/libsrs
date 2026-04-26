@@ -142,21 +142,21 @@ impl Procfs<RealDriver> {
 // note: the following constants are defined outside the impl block because Rust doesn't allow to
 // use constants defined in a generic impl block.
 
-/// Max length of the string representation of <pid>.
+/// Max length of the string representation of `<pid>`.
 const MAX_PID_LEN: usize = u32::FORMATTED_SIZE_DECIMAL;
-/// Max allowed length for a suffix after <mount_path>/<pid>/ (see [PATH_BUFF_SIZE]).
+/// Max allowed length for a suffix after `<mount_path>/<pid>/` (see [PATH_BUFF_SIZE]).
 const MAX_SUFFIX_LEN: usize = 32;
 /// Safety margin accounting for `/`s and trailing zeros in procfs path (see [PATH_BUFF_SIZE]).
 const PADDING: usize = 16;
 /// The size of the buffer used to construct procfs file paths. The buffer content is structured
-/// in the following way: <mount_path>/<pid>/<suffix><zero_pad>.
+/// in the following way: `<mount_path>/<pid>/<suffix><zero_pad>`.
 const PATH_BUFF_SIZE: usize = MountPath::MAX_LEN + MAX_PID_LEN + MAX_SUFFIX_LEN + PADDING;
 
 /// The size of the stack-allocated scratch buffer used to read the content of status files (i.e.:
-/// /proc/<pid>/status).
+/// `/proc/<pid>/status`).
 const STATUS_SCAN_BUFF_SIZE: usize = 4 * 1024;
 /// The size of the stack-allocated scratch buffer used to read the content of socket table files
-/// (e.g.: /proc/<pid>/net/tcp).
+/// (e.g.: `/proc/<pid>/net/tcp`).
 const SOCKET_TABLE_SCAN_BUFF_SIZE: usize = 32 * 1024;
 
 macro_rules! scan_impl {
