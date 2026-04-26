@@ -72,7 +72,8 @@ pub trait Driver {
     /// `path` is the non-NUL-terminated binary string representation of a file path.
     fn get_metadata(&self, path: &[u8]) -> io::Result<Self::Metadata>;
 
-    /// Iterate over the entries of the directory at `path`, executing `process` for each entry.
+    /// Iterates over the entries of the directory at `path`, executing `process` for each entry but
+    /// `.` and `..`.
     ///
     /// `path` is the non-NUL-terminated binary string representation of a directory path.
     ///
@@ -243,20 +244,19 @@ impl<D: Driver> Procfs<D> {
         self.driver.get_metadata(path)
     }
 
-    /// Iterate over the entries in `<procfs_mount_path>/<pid>/<dirname>`.
+    /// Iterates over the entries in `<procfs_mount_path>/<pid>/fd`.
     ///
-    /// `dirname` is the binary string representation of the subdirectory (e.g., `b"fd"`).
-    /// The `process` callback is invoked for each directory entry found.
+    /// The `process` callback is invoked for each directory entry found. `.` and `..` are excluded.
     ///
     /// # Errors
     ///
     /// Returns an error if the directory cannot be opened or if the callback returns an error.
-    pub fn scan_dir<P>(&self, pid: u32, dirname: &[u8], process: P) -> io::Result<()>
+    pub fn scan_fd_dir<P>(&self, pid: u32, process: P) -> io::Result<()>
     where
         P: FnMut(&D::DirEntry) -> io::Result<()>,
     {
         let mut path_buff = Self::new_path_buff();
-        let written_bytes = self.write_proc_file_path(&mut path_buff[..], pid, dirname);
+        let written_bytes = self.write_proc_file_path(&mut path_buff[..], pid, b"fd");
         let path = &path_buff[..written_bytes];
         self.driver.scan_dir(path, process)
     }
@@ -728,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_dir_happy_path() {
+    fn test_scan_fd_dir_happy_path() {
         let mut driver = MockDriver::new();
         let dir_entry = MockDirEntry {
             file_name: OsString::from("0"),
@@ -739,7 +739,7 @@ mod tests {
         let procfs = Procfs::new_with_driver(mount_path, driver);
         let mut entries = Vec::new();
         procfs
-            .scan_dir(100, b"fd", |entry| {
+            .scan_fd_dir(100, |entry| {
                 entries.push(entry.clone());
                 Ok(())
             })
