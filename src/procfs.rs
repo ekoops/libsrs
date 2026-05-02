@@ -1,14 +1,14 @@
 use crate::buffer_writer::FromBufferWriter;
-use crate::fs::{self, Metadata, MetadataExt};
+use crate::fs::{self, DirEntry, Metadata, MetadataExt};
 use crate::read::LineProcessor;
 use crate::task::{Cmdline, Comm, Environ, OsPath};
 use crate::{parse, read};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
-use std::fs::{DirEntry, File};
+use std::fs::File;
+use std::io;
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
-use std::{fs as std_fs, io};
 use thiserror::Error;
 
 /// Error returned by [MountPath::new].
@@ -53,7 +53,7 @@ impl MountPath {
 /// This allows to easily mock file system accesses in tests.
 pub trait Driver {
     type Reader: io::Read;
-    type DirEntry;
+    type DirEntry<'a>;
     type Metadata: MetadataExt;
 
     /// Creates a [Self::Reader] for `path`.
@@ -74,7 +74,7 @@ pub trait Driver {
     /// early.
     fn scan_dir<P>(&self, path: &CStr, process: P) -> io::Result<()>
     where
-        P: FnMut(&Self::DirEntry) -> io::Result<()>;
+        P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>;
 }
 
 /// The canonical [Driver] implementation.
@@ -82,7 +82,7 @@ pub struct RealDriver;
 
 impl Driver for RealDriver {
     type Reader = File;
-    type DirEntry = DirEntry;
+    type DirEntry<'a> = DirEntry<'a>;
     type Metadata = Metadata;
 
     #[inline(always)]
@@ -102,16 +102,11 @@ impl Driver for RealDriver {
     }
 
     #[inline(always)]
-    fn scan_dir<P>(&self, path: &CStr, mut process: P) -> io::Result<()>
+    fn scan_dir<P>(&self, path: &CStr, process: P) -> io::Result<()>
     where
-        P: FnMut(&Self::DirEntry) -> io::Result<()>,
+        P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>,
     {
-        let path = OsStr::from_bytes(path.to_bytes());
-        for dir_entry in std_fs::read_dir(path)? {
-            let dir_entry = dir_entry?;
-            process(&dir_entry)?;
-        }
-        Ok(())
+        fs::scan_dir(path, process)
     }
 }
 
@@ -261,7 +256,7 @@ impl<D: Driver> Procfs<D> {
     /// Returns an error if the directory cannot be opened or if the callback returns an error.
     pub fn scan_fd_dir<P>(&self, pid: u32, process: P) -> io::Result<()>
     where
-        P: FnMut(&D::DirEntry) -> io::Result<()>,
+        P: FnMut(&D::DirEntry<'_>) -> io::Result<()>,
     {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, c"fd")?;
@@ -445,7 +440,7 @@ mod tests {
 
     impl Driver for MockDriver {
         type Reader = Cursor<Vec<u8>>;
-        type DirEntry = MockDirEntry;
+        type DirEntry<'a> = MockDirEntry;
         type Metadata = MockMetadata;
 
         fn open(&self, path: &CStr) -> io::Result<Self::Reader> {
@@ -498,7 +493,7 @@ mod tests {
 
         fn scan_dir<P>(&self, path: &CStr, mut process: P) -> io::Result<()>
         where
-            P: FnMut(&Self::DirEntry) -> io::Result<()>,
+            P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>,
         {
             let path_bytes = path.to_bytes();
             let Some(dir_entries) = self.dir_entries.get(path_bytes) else {
