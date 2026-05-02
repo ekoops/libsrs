@@ -1,11 +1,10 @@
 use crate::buffer_writer::FromBufferWriter;
-use crate::fs::{self, DirEntry, Metadata, MetadataExt};
+use crate::fs::{self, DirEntry, File, Metadata, MetadataExt};
 use crate::read::LineProcessor;
 use crate::task::{Cmdline, Comm, Environ, OsPath};
 use crate::{parse, read};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
-use std::fs::File;
 use std::io;
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
@@ -87,8 +86,7 @@ impl Driver for RealDriver {
 
     #[inline(always)]
     fn open(&self, path: &CStr) -> io::Result<Self::Reader> {
-        let path = OsStr::from_bytes(path.to_bytes());
-        File::open(path)
+        fs::open_file_rdonly(path)
     }
 
     #[inline(always)]
