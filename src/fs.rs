@@ -1,6 +1,8 @@
 use rustix::fs::{self, Dir, Mode, OFlags, Stat, CWD};
 use std::ffi::CStr;
+use std::fs as std_fs;
 use std::io;
+use std::io::Read;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 /// Invokes `openat(2)` system call.
@@ -13,6 +15,23 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 /// Returns an [`io::Error`] (sourced from errno) if the underlying `openat(2)` system call fails.
 fn openat<Fd: AsFd>(fd: Fd, path: &CStr, flags: OFlags, mode: Mode) -> io::Result<OwnedFd> {
     fs::openat(fd, path, flags, mode).map_err(Into::into)
+}
+
+/// An object providing access to an open file on the filesystem.
+pub struct File(std_fs::File);
+
+impl Read for File {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+/// Creates a [File] for `path`.
+///
+/// The file is opened read-only.
+pub fn open_file_rdonly(path: &CStr) -> io::Result<File> {
+    let fd = openat(CWD, path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
+    Ok(File(std_fs::File::from(fd)))
 }
 
 /// File metadata.
