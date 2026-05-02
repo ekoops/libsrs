@@ -4,7 +4,7 @@ use crate::read::LineProcessor;
 use crate::task::{Cmdline, Comm, Environ, OsPath};
 use crate::{parse, read};
 use lexical_core::FormattedSize;
-use std::ffi::{CStr, CString, NulError, OsStr, OsString};
+use std::ffi::{CStr, CString, NulError, OsString};
 use std::io;
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
@@ -91,7 +91,7 @@ impl Driver for RealDriver {
 
     #[inline(always)]
     fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
-        read::link(path, buff)
+        fs::read_symlink_target(path, buff)
     }
 
     #[inline(always)]
@@ -347,6 +347,7 @@ impl<D: Driver> Procfs<D> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::ffi::OsStr;
     use std::io::Cursor;
     use std::ops::ControlFlow;
 

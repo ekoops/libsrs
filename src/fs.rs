@@ -17,6 +17,28 @@ fn openat<Fd: AsFd>(fd: Fd, path: &CStr, flags: OFlags, mode: Mode) -> io::Resul
     fs::openat(fd, path, flags, mode).map_err(Into::into)
 }
 
+/// Invokes `readlinkat(2)` system call.
+///
+/// Arguments have the same semantic of the underlying system call. Returns the strictly positive
+/// number of bytes written.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] (sourced from errno) if the underlying `readlinkat(2)` system call
+/// fails.
+fn readlinkat<Fd: AsFd>(fd: Fd, path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
+    fs::readlinkat_raw(fd, path, buff).map_err(Into::into)
+}
+
+/// Reads the target of the symbolic link at `path` into `buff`, returning the strictly positive
+/// number of bytes written.
+///
+/// The result is not NUL-terminated. If the link target is longer than `buff.len()`, the target is
+/// silently truncated to fit.
+pub fn read_symlink_target(path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
+    readlinkat(CWD, path, buff)
+}
+
 /// An object providing access to an open file on the filesystem.
 pub struct File(std_fs::File);
 
@@ -59,6 +81,23 @@ pub fn read_metadata(path: &CStr) -> io::Result<Metadata> {
 pub struct DirEntry<'a> {
     fd: BorrowedFd<'a>,
     entry: fs::DirEntry,
+}
+
+impl<'a> DirEntry<'a> {
+    /// Reads the target of the symbolic link into `buff`, returning the strictly positive number of
+    /// bytes written.
+    ///
+    /// The result is not NUL-terminated. If the link target is longer than `buff.len()`, the target
+    /// is silently truncated to fit. The user must ensure that the directory entry is a symbolic
+    /// link.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying system call fails (including invocation on a directory
+    /// entry that is not a symbolic link).
+    pub fn read_symlink_target(&self, buff: &mut [u8]) -> io::Result<usize> {
+        readlinkat(self.fd, self.entry.file_name(), buff)
+    }
 }
 
 /// Iterates over the entries of the directory at `path`, executing `process` for each entry.
