@@ -1,14 +1,14 @@
 use crate::buffer_writer::FromBufferWriter;
+use crate::fs::{self, Metadata, MetadataExt};
 use crate::read::LineProcessor;
 use crate::task::{Cmdline, Comm, Environ, OsPath};
 use crate::{parse, read};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsStr, OsString};
-use std::fs::{DirEntry, File, Metadata};
+use std::fs::{DirEntry, File};
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
-use std::{fs, io};
+use std::{fs as std_fs, io};
 use thiserror::Error;
 
 /// Error returned by [MountPath::new].
@@ -64,8 +64,8 @@ pub trait Driver {
     /// Returns the number of bytes read.
     fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize>;
 
-    /// Returns metadata associated with `path`.
-    fn get_metadata(&self, path: &CStr) -> io::Result<Self::Metadata>;
+    /// Reads metadata associated with `path`.
+    fn read_metadata(&self, path: &CStr) -> io::Result<Self::Metadata>;
 
     /// Iterates over the entries of the directory at `path`, executing `process` for each entry but
     /// `.` and `..`.
@@ -97,9 +97,8 @@ impl Driver for RealDriver {
     }
 
     #[inline(always)]
-    fn get_metadata(&self, path: &CStr) -> io::Result<Metadata> {
-        let path = OsStr::from_bytes(path.to_bytes());
-        fs::metadata(path)
+    fn read_metadata(&self, path: &CStr) -> io::Result<Metadata> {
+        fs::read_metadata(path)
     }
 
     #[inline(always)]
@@ -108,7 +107,7 @@ impl Driver for RealDriver {
         P: FnMut(&Self::DirEntry) -> io::Result<()>,
     {
         let path = OsStr::from_bytes(path.to_bytes());
-        for dir_entry in fs::read_dir(path)? {
+        for dir_entry in std_fs::read_dir(path)? {
             let dir_entry = dir_entry?;
             process(&dir_entry)?;
         }
@@ -247,10 +246,10 @@ impl<D: Driver> Procfs<D> {
     /// Returns metadata associated with `<procfs_mount_path>/<pid>/<path>`.
     ///
     /// `path` is the binary string representation of `<path>`.
-    fn get_metadata(&self, pid: u32, path: &CStr) -> io::Result<D::Metadata> {
+    fn read_metadata(&self, pid: u32, path: &CStr) -> io::Result<D::Metadata> {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, path)?;
-        self.driver.get_metadata(path)
+        self.driver.read_metadata(path)
     }
 
     /// Iterates over the entries in `<procfs_mount_path>/<pid>/fd`.
@@ -310,7 +309,7 @@ impl<D: Driver> Procfs<D> {
 
     /// Returns the inode number of `<procfs_mount_path>/<pid>/ns/net` for `pid`.
     pub fn read_netns_ino(&self, pid: u32) -> io::Result<u64> {
-        let metadata = self.get_metadata(pid, c"ns/net")?;
+        let metadata = self.read_metadata(pid, c"ns/net")?;
         Ok(metadata.ino())
     }
 
@@ -402,27 +401,10 @@ mod tests {
         ino: u64,
     }
 
-    macro_rules! unimplemented_metadata_methods {
-        ($($name:ident -> $ret:ty),*) => {
-            $(
-                fn $name(&self) -> $ret {
-                    unimplemented!(concat!(stringify!($name),
-                        " is not implemented for MockMetadata"))
-                }
-            )*
-        };
-    }
     impl MetadataExt for MockMetadata {
         fn ino(&self) -> u64 {
             self.ino
         }
-
-        // Generate the rest in a single line
-        unimplemented_metadata_methods!(
-            dev -> u64, mode -> u32, nlink -> u64, uid -> u32, gid -> u32, rdev -> u64, size -> u64,
-            atime -> i64, atime_nsec -> i64, mtime -> i64, mtime_nsec -> i64, ctime -> i64,
-            ctime_nsec -> i64, blksize -> u64, blocks -> u64
-        );
     }
 
     /// A mock implementation of [Driver] that serves data from memory.
@@ -500,7 +482,7 @@ mod tests {
             }
         }
 
-        fn get_metadata(&self, path: &CStr) -> io::Result<Self::Metadata> {
+        fn read_metadata(&self, path: &CStr) -> io::Result<Self::Metadata> {
             let path_bytes = path.to_bytes();
             match self.metadatas.get(path_bytes) {
                 Some(content) => Ok(content.clone()),
