@@ -1,4 +1,4 @@
-use rustix::fs::{self, Dir, Mode, OFlags, Stat, CWD};
+use rustix::fs::{self, AtFlags, Dir, Mode, OFlags, Stat, CWD};
 use std::ffi::CStr;
 use std::fs as std_fs;
 use std::io;
@@ -30,11 +30,26 @@ fn readlinkat<Fd: AsFd>(fd: Fd, path: &CStr, buff: &mut [u8]) -> io::Result<usiz
     fs::readlinkat_raw(fd, path, buff).map_err(Into::into)
 }
 
+/// Invokes `fstatat(2)` system call.
+///
+/// Arguments have the same semantic of the underlying system call. Returns information about a
+/// file.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] (sourced from errno) if the underlying `fstatat(2)` system call fails.
+fn fstatat<Fd: AsFd>(fd: Fd, path: &CStr, flags: AtFlags) -> io::Result<Stat> {
+    fs::statat(fd, path, flags).map_err(Into::into)
+}
+
 /// Reads the target of the symbolic link at `path` into `buff`, returning the strictly positive
 /// number of bytes written.
 ///
 /// The result is not NUL-terminated. If the link target is longer than `buff.len()`, the target is
 /// silently truncated to fit.
+///
+/// If `path` is relative, it is assumed relative to the current working directory. An empty `path`
+/// results in an error.
 pub fn read_symlink_target(path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
     readlinkat(CWD, path, buff)
 }
@@ -48,9 +63,10 @@ impl Read for File {
     }
 }
 
-/// Creates a [File] for `path`.
+/// Creates a read-only [File] for `path`.
 ///
-/// The file is opened read-only.
+/// If `path` is relative, it is assumed relative to the current working directory. An empty `path`
+/// results in an error.
 pub fn open_file_rdonly(path: &CStr) -> io::Result<File> {
     let fd = openat(CWD, path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
     Ok(File(std_fs::File::from(fd)))
@@ -72,8 +88,11 @@ impl MetadataExt for Metadata {
 }
 
 /// Reads metadata associated with `path`.
+///
+/// If `path` is relative, it is assumed relative to the current working directory. An empty `path`
+/// results in an error.
 pub fn read_metadata(path: &CStr) -> io::Result<Metadata> {
-    let stat = fs::stat(path)?;
+    let stat = fstatat(CWD, path, AtFlags::empty())?;
     Ok(Metadata(stat))
 }
 
@@ -101,6 +120,9 @@ impl<'a> DirEntry<'a> {
 }
 
 /// Iterates over the entries of the directory at `path`, executing `process` for each entry.
+///
+/// If `path` is relative, it is assumed relative to the current working directory. An empty `path`
+/// results in an error.
 ///
 /// Entries for the current and parent directories (typically `.` and `..`) are skipped.
 ///
