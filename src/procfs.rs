@@ -214,7 +214,7 @@ impl<D: Driver> Procfs<D> {
         path_buff: &'a mut [u8],
         pid: u32,
         filename: &CStr,
-    ) -> io::Result<&'a CStr> {
+    ) -> &'a CStr {
         let mut buff = &mut path_buff[..];
         let mut written_bytes = Self::write_bytes(&mut buff, self.mount_path.0.as_bytes());
         written_bytes += Self::write_bytes(&mut buff, b"/");
@@ -223,8 +223,7 @@ impl<D: Driver> Procfs<D> {
         written_bytes += Self::write_bytes(&mut buff, filename.to_bytes_with_nul());
         // SAFETY: Self::write_bytes(..., filename.to_bytes_with_nul()) guarantees that a trailing
         // NUL byte is written into the buffer.
-        let path = unsafe { CStr::from_bytes_with_nul_unchecked(&path_buff[..written_bytes]) };
-        Ok(path)
+        unsafe { CStr::from_bytes_with_nul_unchecked(&path_buff[..written_bytes]) }
     }
 
     /// Creates a reader for `<procfs_mount_path>/<pid>/<filename>`.
@@ -232,7 +231,7 @@ impl<D: Driver> Procfs<D> {
     /// `filename` is the binary string representation of `<filename>`.
     fn open(&self, pid: u32, filename: &CStr) -> io::Result<D::Reader> {
         let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid, filename)?;
+        let path = self.write_proc_file_path(&mut path_buff, pid, filename);
         self.driver.open(path)
     }
 
@@ -241,7 +240,7 @@ impl<D: Driver> Procfs<D> {
     /// `path` is the binary string representation of `<path>`.
     fn read_metadata(&self, pid: u32, path: &CStr) -> io::Result<D::Metadata> {
         let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid, path)?;
+        let path = self.write_proc_file_path(&mut path_buff, pid, path);
         self.driver.read_metadata(path)
     }
 
@@ -257,7 +256,7 @@ impl<D: Driver> Procfs<D> {
         P: FnMut(&D::DirEntry<'_>) -> io::Result<()>,
     {
         let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid, c"fd")?;
+        let path = self.write_proc_file_path(&mut path_buff, pid, c"fd");
         self.driver.scan_dir(path, process)
     }
 
@@ -311,7 +310,7 @@ impl<D: Driver> Procfs<D> {
     /// `filename` is the binary string representation of `<filename>`.
     fn read_symlink(&self, pid: u32, filename: &CStr) -> io::Result<OsPath> {
         let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid, filename)?;
+        let path = self.write_proc_file_path(&mut path_buff, pid, filename);
         OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
             self.driver.read_symlink(path, buff)
         })
