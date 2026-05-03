@@ -346,6 +346,7 @@ impl<D: Driver> Procfs<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::FileType;
     use std::collections::HashMap;
     use std::ffi::OsStr;
     use std::io::Cursor;
@@ -393,11 +394,16 @@ mod tests {
     #[derive(Debug, Clone, Eq, PartialEq)]
     struct MockMetadata {
         ino: u64,
+        file_type: FileType,
     }
 
     impl MetadataExt for MockMetadata {
         fn ino(&self) -> u64 {
             self.ino
+        }
+
+        fn file_type(&self) -> FileType {
+            self.file_type
         }
     }
 
@@ -617,7 +623,8 @@ mod tests {
     fn test_read_netns_ino_happy_path() {
         let mut driver = MockDriver::new();
         let ino = 1234;
-        driver.add_metadata(b"/proc/100/ns/net", MockMetadata { ino });
+        let file_type = FileType::Symlink;
+        driver.add_metadata(b"/proc/100/ns/net", MockMetadata { ino, file_type });
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
         assert_eq!(procfs.read_netns_ino(100).unwrap(), ino);

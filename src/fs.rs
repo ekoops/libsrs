@@ -72,6 +72,40 @@ pub fn open_file_rdonly(path: &CStr) -> io::Result<File> {
     Ok(File(std_fs::File::from(fd)))
 }
 
+/// File type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileType {
+    RegularFile,
+    Directory,
+    Symlink,
+    Fifo,
+    Socket,
+    CharacterDevice,
+    BlockDevice,
+    Unknown,
+}
+
+impl From<fs::FileType> for FileType {
+    fn from(value: fs::FileType) -> Self {
+        match value {
+            fs::FileType::RegularFile => FileType::RegularFile,
+            fs::FileType::Directory => FileType::Directory,
+            fs::FileType::Symlink => FileType::Symlink,
+            fs::FileType::Fifo => FileType::Fifo,
+            fs::FileType::Socket => FileType::Socket,
+            fs::FileType::CharacterDevice => FileType::CharacterDevice,
+            fs::FileType::BlockDevice => FileType::BlockDevice,
+            _ => FileType::Unknown,
+        }
+    }
+}
+
+impl From<fs::RawMode> for FileType {
+    fn from(value: fs::RawMode) -> Self {
+        fs::FileType::from_raw_mode(value).into()
+    }
+}
+
 /// File metadata.
 pub struct Metadata(Stat);
 
@@ -79,11 +113,17 @@ pub struct Metadata(Stat);
 pub trait MetadataExt {
     /// Returns the inode number.
     fn ino(&self) -> u64;
+    /// Returns the file type.
+    fn file_type(&self) -> FileType;
 }
 
 impl MetadataExt for Metadata {
     fn ino(&self) -> u64 {
         self.0.st_ino
+    }
+
+    fn file_type(&self) -> FileType {
+        self.0.st_mode.into()
     }
 }
 
@@ -103,6 +143,16 @@ pub struct DirEntry<'a> {
 }
 
 impl<'a> DirEntry<'a> {
+    /// Returns the file name of this directory entry.
+    pub fn file_name(&self) -> &CStr {
+        self.entry.file_name()
+    }
+
+    /// Returns the inode number.
+    pub fn ino(&self) -> u64 {
+        self.entry.ino()
+    }
+
     /// Reads the target of the symbolic link into `buff`, returning the strictly positive number of
     /// bytes written.
     ///
@@ -115,7 +165,21 @@ impl<'a> DirEntry<'a> {
     /// Returns an error if the underlying system call fails (including invocation on a directory
     /// entry that is not a symbolic link).
     pub fn read_symlink_target(&self, buff: &mut [u8]) -> io::Result<usize> {
-        readlinkat(self.fd, self.entry.file_name(), buff)
+        readlinkat(self.fd, self.file_name(), buff)
+    }
+
+    /// Reads the metadata of this directory entry.
+    fn read_metadata(&self) -> io::Result<Metadata> {
+        let stat = fstatat(self.fd, self.file_name(), AtFlags::empty())?;
+        Ok(Metadata(stat))
+    }
+
+    /// Reads the file type of this directory entry.
+    pub fn read_file_type(&self) -> io::Result<FileType> {
+        Ok(match self.entry.file_type().into() {
+            FileType::Unknown => self.read_metadata()?.file_type(),
+            ft => ft,
+        })
     }
 }
 
@@ -138,6 +202,7 @@ where
         Mode::empty(),
     )?;
     for dir_entry in Dir::read_from(dir_fd.as_fd())? {
+        // todo(ekoops): maybe we should continue on error...?
         let dir_entry = dir_entry?;
         let name_bytes = dir_entry.file_name().to_bytes();
         if name_bytes == b"." || name_bytes == b".." {
