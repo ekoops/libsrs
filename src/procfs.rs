@@ -1,5 +1,5 @@
 use crate::buffer_writer::FromBufferWriter;
-use crate::fs::{self, DirEntry, File, Metadata, MetadataExt};
+use crate::fs::{self, DirEntry, File, Location, Metadata, MetadataExt};
 use crate::read::LineProcessor;
 use crate::task::{Cmdline, Comm, Environ, OsPath};
 use crate::{parse, read};
@@ -7,6 +7,7 @@ use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsString};
 use std::io;
 use std::ops::ControlFlow;
+use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use thiserror::Error;
 
@@ -86,17 +87,20 @@ impl Driver for RealDriver {
 
     #[inline(always)]
     fn open(&self, path: &CStr) -> io::Result<Self::Reader> {
-        fs::open_file_rdonly(path)
+        let loc = Location::new(path);
+        fs::open_file_rdonly(loc)
     }
 
     #[inline(always)]
     fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
-        fs::read_symlink_target(path, buff)
+        let loc = Location::new(path);
+        fs::read_symlink_target(loc, buff)
     }
 
     #[inline(always)]
     fn read_metadata(&self, path: &CStr) -> io::Result<Metadata> {
-        fs::read_metadata(path)
+        let loc = Location::new(path);
+        fs::read_metadata(loc)
     }
 
     #[inline(always)]
@@ -104,7 +108,8 @@ impl Driver for RealDriver {
     where
         P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>,
     {
-        fs::scan_dir(path, process)
+        let loc = Location::new(path);
+        fs::scan_dir(loc, process)
     }
 }
 

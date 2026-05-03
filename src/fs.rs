@@ -42,16 +42,44 @@ fn fstatat<Fd: AsFd>(fd: Fd, path: &CStr, flags: AtFlags) -> io::Result<Stat> {
     fs::statat(fd, path, flags).map_err(Into::into)
 }
 
-/// Reads the target of the symbolic link at `path` into `buff`, returning the strictly positive
+/// Represents a file system location.
+#[derive(Debug, Copy, Clone)]
+pub struct Location<'fd, 'path> {
+    fd: BorrowedFd<'fd>,
+    path: &'path CStr,
+}
+
+impl<'fd, 'path> Location<'fd, 'path> {
+    /// Creates a new location from `path`. If `path` is relative, it is assumed relative to the
+    /// current working directory.
+    pub fn new(path: &'path CStr) -> Self {
+        Self { fd: CWD, path }
+    }
+
+    /// Creates a new location from `fd` and `path`. If path is absolute, `fd` is ignored by any
+    /// operation using this location.
+    pub fn new_with_fd(fd: BorrowedFd<'fd>, path: &'path CStr) -> Self {
+        Self { fd, path }
+    }
+
+    /// Returns the location's file descriptor.
+    pub fn fd(&self) -> BorrowedFd<'fd> {
+        self.fd
+    }
+
+    /// Returns the location's path.
+    pub fn path(&self) -> &'path CStr {
+        self.path
+    }
+}
+
+/// Reads the target of the symbolic link at `loc` into `buff`, returning the strictly positive
 /// number of bytes written.
 ///
 /// The result is not NUL-terminated. If the link target is longer than `buff.len()`, the target is
 /// silently truncated to fit.
-///
-/// If `path` is relative, it is assumed relative to the current working directory. An empty `path`
-/// results in an error.
-pub fn read_symlink_target(path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
-    readlinkat(CWD, path, buff)
+pub fn read_symlink_target(loc: Location<'_, '_>, buff: &mut [u8]) -> io::Result<usize> {
+    readlinkat(loc.fd, loc.path, buff)
 }
 
 /// An object providing access to an open file on the filesystem.
@@ -63,12 +91,14 @@ impl Read for File {
     }
 }
 
-/// Creates a read-only [File] for `path`.
-///
-/// If `path` is relative, it is assumed relative to the current working directory. An empty `path`
-/// results in an error.
-pub fn open_file_rdonly(path: &CStr) -> io::Result<File> {
-    let fd = openat(CWD, path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
+/// Creates a read-only [File] for `loc`.
+pub fn open_file_rdonly(loc: Location<'_, '_>) -> io::Result<File> {
+    let fd = openat(
+        loc.fd,
+        loc.path,
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
     Ok(File(std_fs::File::from(fd)))
 }
 
@@ -128,11 +158,8 @@ impl MetadataExt for Metadata {
 }
 
 /// Reads metadata associated with `path`.
-///
-/// If `path` is relative, it is assumed relative to the current working directory. An empty `path`
-/// results in an error.
-pub fn read_metadata(path: &CStr) -> io::Result<Metadata> {
-    let stat = fstatat(CWD, path, AtFlags::empty())?;
+pub fn read_metadata(loc: Location<'_, '_>) -> io::Result<Metadata> {
+    let stat = fstatat(loc.fd, loc.path, AtFlags::empty())?;
     Ok(Metadata(stat))
 }
 
@@ -153,6 +180,10 @@ impl<'a> DirEntry<'a> {
         self.entry.ino()
     }
 
+    fn location(&self) -> Location<'_, '_> {
+        Location::new_with_fd(self.fd, self.entry.file_name())
+    }
+
     /// Reads the target of the symbolic link into `buff`, returning the strictly positive number of
     /// bytes written.
     ///
@@ -165,13 +196,14 @@ impl<'a> DirEntry<'a> {
     /// Returns an error if the underlying system call fails (including invocation on a directory
     /// entry that is not a symbolic link).
     pub fn read_symlink_target(&self, buff: &mut [u8]) -> io::Result<usize> {
-        readlinkat(self.fd, self.file_name(), buff)
+        let loc = self.location();
+        read_symlink_target(loc, buff)
     }
 
     /// Reads the metadata of this directory entry.
     fn read_metadata(&self) -> io::Result<Metadata> {
-        let stat = fstatat(self.fd, self.file_name(), AtFlags::empty())?;
-        Ok(Metadata(stat))
+        let loc = self.location();
+        read_metadata(loc)
     }
 
     /// Reads the file type of this directory entry.
@@ -185,19 +217,16 @@ impl<'a> DirEntry<'a> {
 
 /// Iterates over the entries of the directory at `path`, executing `process` for each entry.
 ///
-/// If `path` is relative, it is assumed relative to the current working directory. An empty `path`
-/// results in an error.
-///
 /// Entries for the current and parent directories (typically `.` and `..`) are skipped.
 ///
 /// The `process` closure can return an [io::Result] to handle errors or abort the iteration early.
-pub fn scan_dir<P>(path: &CStr, mut process: P) -> io::Result<()>
+pub fn scan_dir<P>(loc: Location<'_, '_>, mut process: P) -> io::Result<()>
 where
     P: FnMut(&DirEntry<'_>) -> io::Result<()>,
 {
     let dir_fd = openat(
-        CWD,
-        path,
+        loc.fd,
+        loc.path,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
