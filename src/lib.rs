@@ -7,3 +7,4 @@ mod parse;
 pub mod procfs;
 pub mod read;
 pub mod task;
+mod write;
