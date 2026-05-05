@@ -2,7 +2,7 @@ use crate::buffer_writer::FromBufferWriter;
 use crate::fs::{self, DirEntry, File, Location, Metadata, MetadataExt};
 use crate::read::LineProcessor;
 use crate::task::{Cmdline, Comm, Environ, OsPath};
-use crate::{parse, read};
+use crate::{parse, read, write};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsString};
 use std::io;
@@ -221,53 +221,26 @@ impl<D: Driver> Procfs<D> {
         [0u8; PATH_BUFF_SIZE]
     }
 
-    /// Updates `*buff` to point to `len` bytes forward.
-    #[inline]
-    fn advance_buff(buff: &mut &mut [u8], len: usize) {
-        let (_, new_buff) = std::mem::take(buff).split_at_mut(len);
-        *buff = new_buff;
-    }
-
-    /// Writes `bytes` in `*buff` and return `bytes.len()`. Updates `*buff` to point to the first
-    /// unwritten byte.
-    #[inline(always)]
-    fn write_bytes(buff: &mut &mut [u8], bytes: &[u8]) -> usize {
-        let bytes_len = bytes.len();
-        buff[..bytes_len].copy_from_slice(bytes);
-        Self::advance_buff(buff, bytes_len);
-        bytes_len
-    }
-
-    /// Writes the string representation of `pid` into `buff` and returns the number of bytes written.
-    fn write_pid<'a, 'b: 'a>(buff: &'a mut &'b mut [u8], pid: u32) -> usize {
-        let pid_bytes = lexical_core::write(pid, buff);
-        let written_bytes = pid_bytes.len();
-        Self::advance_buff(buff, written_bytes);
-        written_bytes
-    }
-
     /// Writes the mount path, `pid` and `filename` into `buff`, separating them with `/`s, and
     /// and returns a [CStr] view of it.
     fn write_proc_file_path<'a>(
         &self,
         path_buff: &'a mut [u8],
         pid: u32,
-        filename: &CStr,
+        suffix: &CStr,
     ) -> &'a CStr {
-        let mut buff = &mut path_buff[..];
-        let mut written_bytes = Self::write_bytes(&mut buff, self.mount_path.0.as_bytes());
-        written_bytes += Self::write_bytes(&mut buff, b"/");
-        written_bytes += Self::write_pid(&mut buff, pid);
-        written_bytes += Self::write_bytes(&mut buff, b"/");
-        written_bytes += Self::write_bytes(&mut buff, filename.to_bytes_with_nul());
-        // SAFETY: Self::write_bytes(..., filename.to_bytes_with_nul()) guarantees that a trailing
+        let buff = &mut &mut path_buff[..];
+        let mut written_bytes = write::next_bytes(buff, self.mount_path.0.to_bytes());
+        written_bytes += write::next_bytes(buff, b"/");
+        written_bytes += write::next_dec(buff, pid);
+        written_bytes += write::next_bytes(buff, b"/");
+        written_bytes += write::next_bytes(buff, suffix.to_bytes_with_nul());
+        // SAFETY: write::next_bytes(buff, filename.to_bytes_with_nul()) guarantees that a trailing
         // NUL byte is written into the buffer.
         unsafe { CStr::from_bytes_with_nul_unchecked(&path_buff[..written_bytes]) }
     }
 
     /// Creates a reader for `<procfs_mount_path>/<pid>/<filename>`.
-    ///
-    /// `filename` is the binary string representation of `<filename>`.
     fn open(&self, pid: u32, filename: &CStr) -> io::Result<D::Reader> {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, filename);
@@ -275,8 +248,6 @@ impl<D: Driver> Procfs<D> {
     }
 
     /// Returns metadata associated with `<procfs_mount_path>/<pid>/<path>`.
-    ///
-    /// `path` is the binary string representation of `<path>`.
     fn read_metadata(&self, pid: u32, path: &CStr) -> io::Result<D::Metadata> {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, path);
@@ -345,8 +316,6 @@ impl<D: Driver> Procfs<D> {
     }
 
     /// Returns the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`.
-    ///
-    /// `filename` is the binary string representation of `<filename>`.
     fn read_symlink(&self, pid: u32, filename: &CStr) -> io::Result<OsPath> {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, filename);
