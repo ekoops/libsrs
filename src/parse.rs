@@ -56,7 +56,7 @@ fn next_with_format<T, const FORMAT: u128>(buff: &mut &[u8]) -> io::Result<T>
 where
     T: FromLexicalWithOptions,
 {
-    let stripped_buff = strip_ascii_whitespaces(*buff);
+    let stripped_buff = strip_ascii_whitespaces(buff);
     let options = T::Options::default();
     let (value, parsed_bytes) =
         lexical_core::parse_partial_with_options::<T, FORMAT>(stripped_buff, &options)

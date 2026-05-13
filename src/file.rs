@@ -116,13 +116,13 @@ impl UnixSocket {
 }
 
 /// An `AF_NETLINK` socket.
-#[derive(Debug, Copy, Clone)]
+#[derive(Default, Debug, Copy, Clone)]
 pub struct NetlinkSocket;
 
 impl NetlinkSocket {
     /// Creates a new [Self].
     pub fn new() -> Self {
-        Self
+        Default::default()
     }
 }
 

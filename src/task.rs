@@ -275,12 +275,12 @@ impl TaskProcfsStatus {
                 let Some(line) = line.strip_prefix(b"NS") else {
                     return Ok(ControlFlow::Continue(()));
                 };
-                if let Some(mut line) = line.strip_prefix(b"pid:") {
-                    self.ns_pids = Self::parse_pids_from_line(&mut line)?;
-                } else if let Some(mut line) = line.strip_prefix(b"pgid:") {
-                    self.ns_pgids = Self::parse_pids_from_line(&mut line)?;
-                } else if let Some(mut line) = line.strip_prefix(b"tgid:") {
-                    self.ns_tgids = Self::parse_pids_from_line(&mut line)?;
+                if let Some(line) = line.strip_prefix(b"pid:") {
+                    self.ns_pids = Self::parse_pids_from_line(line)?;
+                } else if let Some(line) = line.strip_prefix(b"pgid:") {
+                    self.ns_pgids = Self::parse_pids_from_line(line)?;
+                } else if let Some(line) = line.strip_prefix(b"tgid:") {
+                    self.ns_tgids = Self::parse_pids_from_line(line)?;
                 }
             }
             _ => return Ok(ControlFlow::Continue(())),
@@ -389,13 +389,13 @@ impl OpenFile {
 }
 
 /// A Linux open file table.
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct FdTable(HashMap<u32, OpenFile>);
 
 impl FdTable {
     /// Create a new [Self].
     pub fn new() -> Self {
-        Self(HashMap::new())
+        Default::default()
     }
 
     /// Insert a new open file (replacing any associated with the open file fd).

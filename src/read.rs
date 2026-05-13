@@ -88,7 +88,7 @@ where
         let mut processed_data_len = 0;
         for chunk in buff[..bytes_in_buff].split_inclusive(|&c| c == b'\n') {
             // Don't process lines with no trailing '\n' (this can only be the last line).
-            if !chunk.ends_with(&[b'\n']) {
+            if !chunk.ends_with(b"\n") {
                 break;
             }
 
@@ -156,7 +156,7 @@ mod tests {
 
     impl Read for ErrorReader {
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::Other, "Unrecoverable error"))
+            Err(io::Error::other("Unrecoverable error"))
         }
     }
 

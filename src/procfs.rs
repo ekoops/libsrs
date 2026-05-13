@@ -32,7 +32,7 @@ impl MountPath {
     /// Creates a new [MountPath] from `path`.
     pub fn new(path: OsString) -> Result<Self, MountPathError> {
         let mut path_bytes = path.as_bytes();
-        if path_bytes.len() == 0 {
+        if path_bytes.is_empty() {
             return Err(MountPathError::Empty);
         }
 
@@ -201,7 +201,7 @@ impl<D: Driver> Procfs<D> {
 
     /// Writes the string representation of `pid` into `buff` and returns the number of bytes written.
     fn write_pid<'a, 'b: 'a>(buff: &'a mut &'b mut [u8], pid: u32) -> usize {
-        let pid_bytes = lexical_core::write(pid, *buff);
+        let pid_bytes = lexical_core::write(pid, buff);
         let written_bytes = pid_bytes.len();
         Self::advance_buff(buff, written_bytes);
         written_bytes
@@ -437,7 +437,7 @@ mod tests {
         }
 
         fn add_dir_entry(&mut self, path: impl Into<Vec<u8>>, dir_entry: MockDirEntry) {
-            let list = self.dir_entries.entry(path.into()).or_insert(Vec::new());
+            let list = self.dir_entries.entry(path.into()).or_default();
             list.push(dir_entry);
         }
     }
@@ -641,23 +641,36 @@ mod tests {
     #[test]
     fn test_symlink_reads_happy_path() {
         let mut driver = MockDriver::new();
-        let symlinks: Vec<(
-            &[u8],
-            &str,
-            fn(&Procfs<MockDriver>, u32) -> io::Result<OsPath>,
-        )> = vec![
-            (b"/proc/100/exe", "target_exe", Procfs::read_exe),
-            (b"/proc/100/cwd", "target_cwd", Procfs::read_cwd),
-            (b"/proc/100/root", "target_root", Procfs::read_root),
+        struct TestData {
+            path: &'static [u8],
+            expected_target: &'static str,
+            get_target_fn: fn(&Procfs<MockDriver>, u32) -> io::Result<OsPath>,
+        }
+        let tests: Vec<TestData> = vec![
+            TestData {
+                path: b"/proc/100/exe",
+                expected_target: "target_exe",
+                get_target_fn: Procfs::read_exe,
+            },
+            TestData {
+                path: b"/proc/100/cwd",
+                expected_target: "target_cwd",
+                get_target_fn: Procfs::read_cwd,
+            },
+            TestData {
+                path: b"/proc/100/root",
+                expected_target: "target_root",
+                get_target_fn: Procfs::read_root,
+            },
         ];
-        for (path, target, _) in &symlinks {
-            driver.add_symlink(*path, *target);
+        for test in &tests {
+            driver.add_symlink(test.path, test.expected_target);
         }
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        for (_, expected_target, get_target) in &symlinks {
-            let target = get_target(&procfs, 100).unwrap();
-            assert_eq!(target.as_os_str(), OsStr::new(expected_target));
+        for test in &tests {
+            let target = (test.get_target_fn)(&procfs, 100).unwrap();
+            assert_eq!(target.as_os_str(), OsStr::new(test.expected_target));
         }
     }
 
@@ -666,10 +679,11 @@ mod tests {
         let driver = MockDriver::new();
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let get_target_helpers: Vec<fn(&Procfs<MockDriver>, u32) -> io::Result<OsPath>> =
+        type Helper = fn(&Procfs<MockDriver>, u32) -> io::Result<OsPath>;
+        let get_target_fns: Vec<Helper> =
             vec![Procfs::read_exe, Procfs::read_cwd, Procfs::read_root];
-        for get_target in get_target_helpers {
-            let err = get_target(&procfs, 100).unwrap_err();
+        for get_target_fn in get_target_fns {
+            let err = get_target_fn(&procfs, 100).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::NotFound);
         }
     }
