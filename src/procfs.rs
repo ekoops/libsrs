@@ -7,7 +7,7 @@ use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsString};
 use std::io;
 use std::ops::ControlFlow;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use thiserror::Error;
 
@@ -52,27 +52,42 @@ impl MountPath {
 ///
 /// This allows to easily mock file system accesses in tests.
 pub trait Driver {
+    type DirHandle;
     type Reader: io::Read;
     type DirEntry<'a>;
     type Metadata: MetadataExt;
 
-    /// Creates a [Self::Reader] for `path`.
-    fn open(&self, path: &CStr) -> io::Result<Self::Reader>;
+    /// Creates a [Self::Reader] for `dir_handle` + `path`.
+    fn open(&self, dir_handle: Option<&Self::DirHandle>, path: &CStr) -> io::Result<Self::Reader>;
 
-    /// Reads the content of the symbolic link at `path` and store it in `buff`.
+    /// Reads the content of the symbolic link at `dir_handle` + `path` and stores it in `buff`.
     ///
     /// Returns the number of bytes read.
-    fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize>;
+    fn read_symlink(
+        &self,
+        dir_handle: Option<&Self::DirHandle>,
+        path: &CStr,
+        buff: &mut [u8],
+    ) -> io::Result<usize>;
 
-    /// Reads metadata associated with `path`.
-    fn read_metadata(&self, path: &CStr) -> io::Result<Self::Metadata>;
+    /// Reads metadata associated with `dir_handle` + `path`.
+    fn read_metadata(
+        &self,
+        dir_handle: Option<&Self::DirHandle>,
+        path: &CStr,
+    ) -> io::Result<Self::Metadata>;
 
-    /// Iterates over the entries of the directory at `path`, executing `process` for each entry but
-    /// `.` and `..`.
+    /// Iterates over the entries of the directory at `dir_handle` + `path`, executing `process` for
+    /// each entry but `.` and `..`.
     ///
     /// The `process` closure can return an [io::Result] to handle errors or abort the iteration
     /// early.
-    fn scan_dir<P>(&self, path: &CStr, process: P) -> io::Result<()>
+    fn scan_dir<P>(
+        &self,
+        dir_handle: Option<&Self::DirHandle>,
+        path: &CStr,
+        process: P,
+    ) -> io::Result<()>
     where
         P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>;
 }
@@ -80,35 +95,54 @@ pub trait Driver {
 /// The canonical [Driver] implementation.
 pub struct RealDriver;
 
+impl RealDriver {
+    /// Creates a new file system location from the provided `dir_handle` (if any) and `path`.
+    fn new_location<'fd, 'path>(
+        dir_handle: Option<&'fd OwnedFd>,
+        path: &'path CStr,
+    ) -> Location<'fd, 'path> {
+        match dir_handle {
+            Some(fd) => Location::new_with_fd(fd.as_fd(), path),
+            None => Location::new(path),
+        }
+    }
+}
+
 impl Driver for RealDriver {
+    type DirHandle = OwnedFd;
     type Reader = File;
     type DirEntry<'a> = DirEntry<'a>;
     type Metadata = Metadata;
 
     #[inline(always)]
-    fn open(&self, path: &CStr) -> io::Result<Self::Reader> {
-        let loc = Location::new(path);
+    fn open(&self, dir_handle: Option<&OwnedFd>, path: &CStr) -> io::Result<File> {
+        let loc = Self::new_location(dir_handle, path);
         fs::open_file_rdonly(loc)
     }
 
     #[inline(always)]
-    fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
-        let loc = Location::new(path);
+    fn read_symlink(
+        &self,
+        dir_handle: Option<&OwnedFd>,
+        path: &CStr,
+        buff: &mut [u8],
+    ) -> io::Result<usize> {
+        let loc = Self::new_location(dir_handle, path);
         fs::read_symlink_target(loc, buff)
     }
 
     #[inline(always)]
-    fn read_metadata(&self, path: &CStr) -> io::Result<Metadata> {
-        let loc = Location::new(path);
+    fn read_metadata(&self, dir_handle: Option<&OwnedFd>, path: &CStr) -> io::Result<Metadata> {
+        let loc = Self::new_location(dir_handle, path);
         fs::read_metadata(loc)
     }
 
     #[inline(always)]
-    fn scan_dir<P>(&self, path: &CStr, process: P) -> io::Result<()>
+    fn scan_dir<P>(&self, dir_handle: Option<&OwnedFd>, path: &CStr, process: P) -> io::Result<()>
     where
-        P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>,
+        P: FnMut(&DirEntry<'_>) -> io::Result<()>,
     {
-        let loc = Location::new(path);
+        let loc = Self::new_location(dir_handle, path);
         fs::scan_dir(loc, process)
     }
 }
@@ -237,7 +271,7 @@ impl<D: Driver> Procfs<D> {
     fn open(&self, pid: u32, filename: &CStr) -> io::Result<D::Reader> {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, filename);
-        self.driver.open(path)
+        self.driver.open(None, path)
     }
 
     /// Returns metadata associated with `<procfs_mount_path>/<pid>/<path>`.
@@ -246,7 +280,7 @@ impl<D: Driver> Procfs<D> {
     fn read_metadata(&self, pid: u32, path: &CStr) -> io::Result<D::Metadata> {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, path);
-        self.driver.read_metadata(path)
+        self.driver.read_metadata(None, path)
     }
 
     /// Iterates over the entries in `<procfs_mount_path>/<pid>/fd`.
@@ -262,7 +296,7 @@ impl<D: Driver> Procfs<D> {
     {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, c"fd");
-        self.driver.scan_dir(path, process)
+        self.driver.scan_dir(None, path, process)
     }
 
     /// Returns the content read from `<procfs_mount_path>/<pid>/comm` for `pid`.
@@ -317,7 +351,7 @@ impl<D: Driver> Procfs<D> {
         let mut path_buff = Self::new_path_buff();
         let path = self.write_proc_file_path(&mut path_buff, pid, filename);
         OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
-            self.driver.read_symlink(path, buff)
+            self.driver.read_symlink(None, path, buff)
         })
     }
 
@@ -445,15 +479,31 @@ mod tests {
             let list = self.dir_entries.entry(path.into()).or_default();
             list.push(dir_entry);
         }
+
+        fn resolve_path(dir_handle: Option<&Vec<u8>>, path: &CStr) -> Vec<u8> {
+            let mut prefix = match dir_handle {
+                Some(v) => v.clone(),
+                None => Vec::new(),
+            };
+            let suffix = path.to_bytes();
+            let need_slash = !prefix.ends_with(b"/") && !suffix.starts_with(b"/");
+            if need_slash {
+                prefix.push(b'/');
+            }
+            prefix.extend_from_slice(suffix);
+            prefix
+        }
     }
 
     impl Driver for MockDriver {
+        type DirHandle = Vec<u8>;
         type Reader = Cursor<Vec<u8>>;
         type DirEntry<'a> = MockDirEntry;
         type Metadata = MockMetadata;
 
-        fn open(&self, path: &CStr) -> io::Result<Self::Reader> {
-            let path_bytes = path.to_bytes();
+        fn open(&self, dir_handle: Option<&Vec<u8>>, path: &CStr) -> io::Result<Self::Reader> {
+            let path = Self::resolve_path(dir_handle, path);
+            let path_bytes = path.as_slice();
             match self.files.get(path_bytes) {
                 Some(content) => Ok(Cursor::new(content.clone())),
                 None => Err(io::Error::new(
@@ -466,8 +516,14 @@ mod tests {
             }
         }
 
-        fn read_symlink(&self, path: &CStr, buff: &mut [u8]) -> io::Result<usize> {
-            let path_bytes = path.to_bytes();
+        fn read_symlink(
+            &self,
+            dir_handle: Option<&Vec<u8>>,
+            path: &CStr,
+            buff: &mut [u8],
+        ) -> io::Result<usize> {
+            let path = Self::resolve_path(dir_handle, path);
+            let path_bytes = path.as_slice();
             match self.symlinks.get(path_bytes) {
                 Some(target) => {
                     if target.len() > buff.len() {
@@ -486,8 +542,13 @@ mod tests {
             }
         }
 
-        fn read_metadata(&self, path: &CStr) -> io::Result<Self::Metadata> {
-            let path_bytes = path.to_bytes();
+        fn read_metadata(
+            &self,
+            dir_handle: Option<&Vec<u8>>,
+            path: &CStr,
+        ) -> io::Result<Self::Metadata> {
+            let path = Self::resolve_path(dir_handle, path);
+            let path_bytes = path.as_slice();
             match self.metadatas.get(path_bytes) {
                 Some(content) => Ok(content.clone()),
                 None => Err(io::Error::new(
@@ -500,11 +561,17 @@ mod tests {
             }
         }
 
-        fn scan_dir<P>(&self, path: &CStr, mut process: P) -> io::Result<()>
+        fn scan_dir<P>(
+            &self,
+            dir_handle: Option<&Vec<u8>>,
+            path: &CStr,
+            mut process: P,
+        ) -> io::Result<()>
         where
             P: FnMut(&Self::DirEntry<'_>) -> io::Result<()>,
         {
-            let path_bytes = path.to_bytes();
+            let path = Self::resolve_path(dir_handle, path);
+            let path_bytes = path.as_slice();
             let Some(dir_entries) = self.dir_entries.get(path_bytes) else {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
