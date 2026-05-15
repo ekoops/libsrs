@@ -325,15 +325,16 @@ impl Task {
     /// Create [Self] for `pid` by gathering data from `procfs`.
     pub fn from_procfs(procfs: &Procfs, pid: u32) -> io::Result<Self> {
         let mut procfs_status = TaskProcfsStatus::default();
-        let _cf = procfs.scan_status(pid, |line: &[u8]| procfs_status.update_from_line(line))?;
+        let proc = procfs.open_proc(pid)?;
+        let _cf = proc.scan_status(|line: &[u8]| procfs_status.update_from_line(line))?;
         let task = Self {
-            comm: procfs.read_comm(pid)?,
-            exe: procfs.read_exe(pid)?,
-            cwd: procfs.read_cwd(pid)?,
-            root: procfs.read_root(pid)?,
-            environ: procfs.read_environ(pid)?,
-            cmdline: procfs.read_cmdline(pid)?,
-            loginuid: procfs.read_loginuid(pid)? as i32,
+            comm: proc.read_comm()?,
+            exe: proc.read_exe()?,
+            cwd: proc.read_cwd()?,
+            root: proc.read_root()?,
+            environ: proc.read_environ()?,
+            cmdline: proc.read_cmdline()?,
+            loginuid: proc.read_loginuid()? as i32,
             tgid: procfs_status.tgid,
             ruid: procfs_status.ruid,
             euid: procfs_status.euid,

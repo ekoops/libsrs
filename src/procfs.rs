@@ -54,8 +54,15 @@ impl MountPath {
 pub trait Driver {
     type DirHandle;
     type Reader: io::Read;
-    type DirEntry<'a>;
     type Metadata: MetadataExt;
+    type DirEntry<'a>;
+
+    /// Creates a [Self::DirHandle] for `dir_handle` + `path`.
+    fn open_dir(
+        &self,
+        dir_handle: Option<&Self::DirHandle>,
+        path: &CStr,
+    ) -> io::Result<Self::DirHandle>;
 
     /// Creates a [Self::Reader] for `dir_handle` + `path`.
     fn open(&self, dir_handle: Option<&Self::DirHandle>, path: &CStr) -> io::Result<Self::Reader>;
@@ -111,8 +118,14 @@ impl RealDriver {
 impl Driver for RealDriver {
     type DirHandle = OwnedFd;
     type Reader = File;
-    type DirEntry<'a> = DirEntry<'a>;
     type Metadata = Metadata;
+    type DirEntry<'a> = DirEntry<'a>;
+
+    #[inline(always)]
+    fn open_dir(&self, dir_handle: Option<&OwnedFd>, path: &CStr) -> io::Result<OwnedFd> {
+        let loc = Self::new_location(dir_handle, path);
+        fs::open_dir_for_traversal(loc)
+    }
 
     #[inline(always)]
     fn open(&self, dir_handle: Option<&OwnedFd>, path: &CStr) -> io::Result<File> {
@@ -149,6 +162,7 @@ impl Driver for RealDriver {
 
 /// A helper type allowing to extract data from procfs. If unspecified, it leverages [RealDriver]
 /// for filesystem accesses.
+#[derive(Debug)]
 pub struct Procfs<D: Driver = RealDriver> {
     mount_path: MountPath,
     driver: D,
@@ -169,44 +183,13 @@ impl Procfs<RealDriver> {
 
 /// Max length of the string representation of `<pid>`.
 const MAX_PID_LEN: usize = u32::FORMATTED_SIZE_DECIMAL;
-/// Max allowed length for a suffix after `<mount_path>/<pid>/` (see [PATH_BUFF_SIZE]).
+/// Max allowed length for a suffix after `<procfs_mount_path>/<pid>/` (see [PATH_BUFF_SIZE]).
 const MAX_SUFFIX_LEN: usize = 32;
 /// Safety margin accounting for `/`s and trailing zeros in procfs path (see [PATH_BUFF_SIZE]).
 const PADDING: usize = 16;
 /// The size of the buffer used to construct procfs file paths. The buffer content is structured
-/// in the following way: `<mount_path>/<pid>/<suffix><zero_pad>`.
+/// in the following way: `<procfs_mount_path>/<pid>/<suffix><zero_pad>`.
 const PATH_BUFF_SIZE: usize = MountPath::MAX_LEN + MAX_PID_LEN + MAX_SUFFIX_LEN + PADDING;
-
-/// The size of the stack-allocated scratch buffer used to read the content of status files (i.e.:
-/// `/proc/<pid>/status`).
-const STATUS_SCAN_BUFF_SIZE: usize = 4 * 1024;
-/// The size of the stack-allocated scratch buffer used to read the content of socket table files
-/// (e.g.: `/proc/<pid>/net/tcp`).
-const SOCKET_TABLE_SCAN_BUFF_SIZE: usize = 32 * 1024;
-
-macro_rules! scan_impl {
-    ($fn_name:ident, $path:literal, $buff_size:ident) => {
-        #[doc = concat!("Scan each line of `<procfs_mount_path>/<pid>/", $path,
-                                                    "` for `pid` and pass it to `line_processor`.")]
-        pub fn $fn_name<P>(&self, pid: u32, line_processor: P) -> io::Result<ControlFlow<()>>
-        where
-            P: LineProcessor,
-        {
-            const _: () = {
-                assert!($path.len() <= MAX_SUFFIX_LEN, concat!("Path '", $path, "' exceeds ",
-                    stringify!(MAX_SUFFIX_LEN)));
-            };
-            // Convert path to &CStr at compile time.
-            const PATH_CSTR: &CStr = match CStr::from_bytes_with_nul(concat!($path, "\0").as_bytes()) {
-                Ok(cstr) => cstr,
-                Err(_) => panic!(concat!("path '", $path, "' contains interior null bytes")),
-            };
-            let mut reader = self.open(pid, PATH_CSTR)?;
-            let mut buff = [0u8; $buff_size];
-            read::scan_lines(&mut reader, &mut buff, line_processor)
-        }
-    };
-}
 
 impl<D: Driver> Procfs<D> {
     /// Creates a new [Procfs] instance from the specified procfs `mount_path` leveraging the
@@ -240,39 +223,178 @@ impl<D: Driver> Procfs<D> {
         unsafe { CStr::from_bytes_with_nul_unchecked(&path_buff[..written_bytes]) }
     }
 
-    /// Creates a reader for `<procfs_mount_path>/<pid>/<filename>`.
-    fn open(&self, pid: u32, filename: &CStr) -> io::Result<D::Reader> {
-        let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid, filename);
-        self.driver.open(None, path)
-    }
-
-    /// Returns metadata associated with `<procfs_mount_path>/<pid>/<path>`.
-    fn read_metadata(&self, pid: u32, path: &CStr) -> io::Result<D::Metadata> {
-        let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid, path);
-        self.driver.read_metadata(None, path)
-    }
-
-    /// Iterates over the entries in `<procfs_mount_path>/<pid>/fd`.
+    /// Opens the `<procfs_mount_path>/<pid>` process' procfs subtree and returns a [ProcView] of
+    /// it.
     ///
-    /// The `process` callback is invoked for each directory entry found. `.` and `..` are excluded.
+    /// Use [Self::proc_ref] if you need to perform just a single operation on a subtree.
+    pub fn open_proc(&self, pid: u32) -> io::Result<ProcView<'_, D>> {
+        let mut path_buff = Self::new_path_buff();
+        let path = self.write_proc_file_path(&mut path_buff, pid, c"");
+        let dir_handle = self.driver.open_dir(None, path)?;
+        Ok(ProcView {
+            procfs: self,
+            proc_ref: ProcRef::Anchored(dir_handle),
+        })
+    }
+
+    /// Returns a [ProcView] that references the `<procfs_mount_path>/<pid>` process' procfs
+    /// subtree.
+    ///
+    /// Use [Self::open_proc] if you need to perform multiple operations on the same subtree.
+    pub fn proc_ref(&self, pid: u32) -> ProcView<'_, D> {
+        ProcView {
+            procfs: self,
+            proc_ref: ProcRef::Pid(pid),
+        }
+    }
+
+    /// Creates a reader for the `path`.
+    ///
+    /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
+    fn open(&self, proc_ref: &ProcRef<D::DirHandle>, path: &CStr) -> io::Result<D::Reader> {
+        match proc_ref {
+            ProcRef::Pid(pid) => {
+                let mut path_buff = Self::new_path_buff();
+                let path = self.write_proc_file_path(&mut path_buff, *pid, path);
+                self.driver.open(None, path)
+            }
+            ProcRef::Anchored(fd) => self.driver.open(Some(fd), path),
+        }
+    }
+
+    /// Returns metadata associated with `path`.
+    ///
+    /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
+    fn read_metadata(
+        &self,
+        proc_ref: &ProcRef<D::DirHandle>,
+        path: &CStr,
+    ) -> io::Result<D::Metadata> {
+        match proc_ref {
+            ProcRef::Pid(pid) => {
+                let mut path_buff = Self::new_path_buff();
+                let path = self.write_proc_file_path(&mut path_buff, *pid, path);
+                self.driver.read_metadata(None, path)
+            }
+            ProcRef::Anchored(fd) => self.driver.read_metadata(Some(fd), path),
+        }
+    }
+
+    /// Returns the content of the symbolic link `path`.
+    ///
+    /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
+    fn read_symlink(&self, proc_ref: &ProcRef<D::DirHandle>, path: &CStr) -> io::Result<OsPath> {
+        OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
+            match proc_ref {
+                ProcRef::Pid(pid) => {
+                    let mut path_buff = Self::new_path_buff();
+                    let path = self.write_proc_file_path(&mut path_buff, *pid, path);
+                    self.driver.read_symlink(None, path, buff)
+                }
+                ProcRef::Anchored(fd) => self.driver.read_symlink(Some(fd), path, buff),
+            }
+        })
+    }
+
+    /// Iterates over the entries in `path`, invoking `process` for each of them.
+    ///
+    /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
+    /// `process` is not invoked for `.` and `..` entries.
     ///
     /// # Errors
     ///
     /// Returns an error if the directory cannot be opened or if the callback returns an error.
-    pub fn scan_fd_dir<P>(&self, pid: u32, process: P) -> io::Result<()>
+    fn scan_dir<P>(
+        &self,
+        proc_ref: &ProcRef<D::DirHandle>,
+        path: &CStr,
+        process: P,
+    ) -> io::Result<()>
     where
         P: FnMut(&D::DirEntry<'_>) -> io::Result<()>,
     {
-        let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid, c"fd");
-        self.driver.scan_dir(None, path, process)
+        match proc_ref {
+            ProcRef::Pid(pid) => {
+                let mut path_buff = Self::new_path_buff();
+                let path = self.write_proc_file_path(&mut path_buff, *pid, path);
+                self.driver.scan_dir(None, path, process)
+            }
+            ProcRef::Anchored(fd) => self.driver.scan_dir(Some(fd), path, process),
+        }
+    }
+}
+
+/// A reference to a `<procfs_mount_path>/<pid>` process' procfs subtree.
+#[derive(Debug)]
+enum ProcRef<A> {
+    Pid(u32),
+    Anchored(A),
+}
+
+/// A view of a `<procfs_mount_path>/<pid>` process' procfs subtree, allowing to extract information
+/// from it.
+#[derive(Debug)]
+pub struct ProcView<'procfs, D: Driver> {
+    procfs: &'procfs Procfs<D>,
+    proc_ref: ProcRef<D::DirHandle>,
+}
+
+// note: the following constants are defined outside the impl block because Rust doesn't allow to
+// use constants defined in a generic impl block.
+
+/// The size of the stack-allocated scratch buffer used to read the content of status files (i.e.:
+/// `<procfs_mount_path>/<pid>/status`).
+const STATUS_SCAN_BUFF_SIZE: usize = 4 * 1024;
+/// The size of the stack-allocated scratch buffer used to read the content of socket table files
+/// (e.g.: `<procfs_mount_path>/<pid>/net/tcp`).
+const SOCKET_TABLE_SCAN_BUFF_SIZE: usize = 32 * 1024;
+
+macro_rules! scan_impl {
+    ($fn_name:ident, $path:literal, $buff_size:ident) => {
+        #[doc = concat!("Scans each line of `<procfs_mount_path>/<pid>/", $path,
+                                                            "` and passes it to `line_processor`.")]
+        pub fn $fn_name<P>(&self, line_processor: P) -> io::Result<ControlFlow<()>>
+        where
+            P: LineProcessor,
+        {
+            const _: () = {
+                assert!(
+                    $path.len() <= MAX_SUFFIX_LEN,
+                    concat!("Path '", $path, "' exceeds ", stringify!(MAX_SUFFIX_LEN))
+                );
+            };
+            // Convert path to &CStr at compile time.
+            const PATH_CSTR: &CStr =
+                match CStr::from_bytes_with_nul(concat!($path, "\0").as_bytes()) {
+                    Ok(cstr) => cstr,
+                    Err(_) => panic!(concat!("path '", $path, "' contains interior NUL bytes")),
+                };
+            let mut reader = self.procfs.open(&self.proc_ref, PATH_CSTR)?;
+            let mut buff = [0u8; $buff_size];
+            read::scan_lines(&mut reader, &mut buff, line_processor)
+        }
+    };
+}
+
+impl<D: Driver> ProcView<'_, D> {
+    /// Iterates over the entries in `<procfs_mount_path>/<pid>/fd`, invoking `process` for each of
+    /// them.
+    ///
+    /// `process` is not invoked for `.` and `..` entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be opened or if the callback returns an error.
+    pub fn scan_fd_dir<P>(&self, process: P) -> io::Result<()>
+    where
+        P: FnMut(&D::DirEntry<'_>) -> io::Result<()>,
+    {
+        self.procfs.scan_dir(&self.proc_ref, c"fd", process)
     }
 
-    /// Returns the content read from `<procfs_mount_path>/<pid>/comm` for `pid`.
-    pub fn read_comm(&self, pid: u32) -> io::Result<Comm> {
-        let mut reader = self.open(pid, c"comm")?;
+    /// Returns the content read from `<procfs_mount_path>/<pid>/comm`.
+    pub fn read_comm(&self) -> io::Result<Comm> {
+        let mut reader = self.procfs.open(&self.proc_ref, c"comm")?;
         Comm::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
             let mut read_bytes = read::exact(&mut reader, buff)?;
             if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
@@ -282,25 +404,25 @@ impl<D: Driver> Procfs<D> {
         })
     }
 
-    /// Returns the content read from `<procfs_mount_path>/<pid>/environ` for `pid`.
-    pub fn read_environ(&self, pid: u32) -> io::Result<Environ> {
-        let mut reader = self.open(pid, c"environ")?;
+    /// Returns the content read from `<procfs_mount_path>/<pid>/environ`.
+    pub fn read_environ(&self) -> io::Result<Environ> {
+        let mut reader = self.procfs.open(&self.proc_ref, c"environ")?;
         Environ::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
             read::exact(&mut reader, buff)
         })
     }
 
-    /// Returns the content read from `<procfs_mount_path>/<pid>/cmdline` for `pid`.
-    pub fn read_cmdline(&self, pid: u32) -> io::Result<Cmdline> {
-        let mut reader = self.open(pid, c"cmdline")?;
+    /// Returns the content read from `<procfs_mount_path>/<pid>/cmdline`.
+    pub fn read_cmdline(&self) -> io::Result<Cmdline> {
+        let mut reader = self.procfs.open(&self.proc_ref, c"cmdline")?;
         Cmdline::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
             read::exact(&mut reader, buff)
         })
     }
 
-    /// Returns the content read from `<procfs_mount_path>/<pid>/loginuid` for `pid`.
-    pub fn read_loginuid(&self, pid: u32) -> io::Result<u32> {
-        let mut reader = self.open(pid, c"loginuid")?;
+    /// Returns the content read from `<procfs_mount_path>/<pid>/loginuid`.
+    pub fn read_loginuid(&self) -> io::Result<u32> {
+        let mut reader = self.procfs.open(&self.proc_ref, c"loginuid")?;
         let mut buff = [0u8; u32::FORMATTED_SIZE_DECIMAL];
         let mut read_bytes = read::exact(&mut reader, &mut buff)?;
         if read_bytes > 0 && buff[read_bytes - 1] == b'\n' {
@@ -309,34 +431,25 @@ impl<D: Driver> Procfs<D> {
         parse::dec_strict(&buff[..read_bytes])
     }
 
-    /// Returns the inode number of `<procfs_mount_path>/<pid>/ns/net` for `pid`.
-    pub fn read_netns_ino(&self, pid: u32) -> io::Result<u64> {
-        let metadata = self.read_metadata(pid, c"ns/net")?;
+    /// Returns the inode number of `<procfs_mount_path>/<pid>/ns/net`.
+    pub fn read_netns_ino(&self) -> io::Result<u64> {
+        let metadata = self.procfs.read_metadata(&self.proc_ref, c"ns/net")?;
         Ok(metadata.ino())
     }
 
-    /// Returns the content of the symbolic link `<procfs_mount_path>/<pid>/<filename>` for `pid`.
-    fn read_symlink(&self, pid: u32, filename: &CStr) -> io::Result<OsPath> {
-        let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid, filename);
-        OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
-            self.driver.read_symlink(None, path, buff)
-        })
+    /// Returns the content of the symbolic link `<procfs_mount_path>/<pid>/exe`.
+    pub fn read_exe(&self) -> io::Result<OsPath> {
+        self.procfs.read_symlink(&self.proc_ref, c"exe")
     }
 
-    /// Returns the content of the symbolic link `<procfs_mount_path>/<pid>/exe` for `pid`.
-    pub fn read_exe(&self, pid: u32) -> io::Result<OsPath> {
-        self.read_symlink(pid, c"exe")
+    /// Returns the content of the symbolic link `<procfs_mount_path>/<pid>/cwd`.
+    pub fn read_cwd(&self) -> io::Result<OsPath> {
+        self.procfs.read_symlink(&self.proc_ref, c"cwd")
     }
 
-    /// Returns the content of the symbolic link `<procfs_mount_path>/<pid>/cwd` for `pid`.
-    pub fn read_cwd(&self, pid: u32) -> io::Result<OsPath> {
-        self.read_symlink(pid, c"cwd")
-    }
-
-    /// Returns the content of the symbolic link `<procfs_mount_path>/<pid>/root` for `pid`.
-    pub fn read_root(&self, pid: u32) -> io::Result<OsPath> {
-        self.read_symlink(pid, c"root")
+    /// Returns the content of the symbolic link `<procfs_mount_path>/<pid>/root`.
+    pub fn read_root(&self) -> io::Result<OsPath> {
+        self.procfs.read_symlink(&self.proc_ref, c"root")
     }
 
     scan_impl!(scan_status, "status", STATUS_SCAN_BUFF_SIZE);
@@ -354,7 +467,7 @@ impl<D: Driver> Procfs<D> {
 mod tests {
     use super::*;
     use crate::fs::FileType;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::ffi::OsStr;
     use std::io::Cursor;
     use std::ops::ControlFlow;
@@ -415,8 +528,10 @@ mod tests {
     }
 
     /// A mock implementation of [Driver] that serves data from memory.
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct MockDriver {
+        /// Set of full directory paths (bytes) that can be opened via [Driver::open_dir].
+        dirs: HashSet<Vec<u8>>,
         /// Map full file paths (bytes) to file content.
         files: HashMap<Vec<u8>, Vec<u8>>,
         /// Map full symlink paths (bytes) to target paths.
@@ -430,6 +545,10 @@ mod tests {
     impl MockDriver {
         fn new() -> Self {
             Self::default()
+        }
+
+        fn add_dir(&mut self, path: impl Into<Vec<u8>>) {
+            self.dirs.insert(path.into());
         }
 
         fn add_file(&mut self, path: impl Into<Vec<u8>>, content: impl Into<Vec<u8>>) {
@@ -467,8 +586,26 @@ mod tests {
     impl Driver for MockDriver {
         type DirHandle = Vec<u8>;
         type Reader = Cursor<Vec<u8>>;
-        type DirEntry<'a> = MockDirEntry;
         type Metadata = MockMetadata;
+        type DirEntry<'a> = MockDirEntry;
+
+        fn open_dir(
+            &self,
+            dir_handle: Option<&Vec<u8>>,
+            path: &CStr,
+        ) -> io::Result<Self::DirHandle> {
+            let path = Self::resolve_path(dir_handle, path);
+            if !self.dirs.contains(path.as_slice()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "Mock dir not found: {:?}",
+                        String::from_utf8_lossy(path.as_slice())
+                    ),
+                ));
+            }
+            Ok(path)
+        }
 
         fn open(&self, dir_handle: Option<&Vec<u8>>, path: &CStr) -> io::Result<Self::Reader> {
             let path = Self::resolve_path(dir_handle, path);
@@ -564,7 +701,7 @@ mod tests {
         driver.add_file(b"/proc/100/comm", b"content\n");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let comm = procfs.read_comm(100).unwrap();
+        let comm = procfs.proc_ref(100).read_comm().unwrap();
         assert_eq!(comm.as_os_str(), OsStr::new("content"));
     }
 
@@ -574,7 +711,7 @@ mod tests {
         driver.add_file(b"/proc/100/comm", b"content");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let comm = procfs.read_comm(100).unwrap();
+        let comm = procfs.proc_ref(100).read_comm().unwrap();
         assert_eq!(comm.as_os_str(), OsStr::new("content"));
     }
 
@@ -585,7 +722,7 @@ mod tests {
         driver.add_file(b"/proc/100/comm", long_comm);
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let comm = procfs.read_comm(100).unwrap();
+        let comm = procfs.proc_ref(100).read_comm().unwrap();
         let comm_str = comm.as_os_str().to_string_lossy();
         assert_eq!(comm_str.len(), Comm::MAX_LEN);
         let truncated_comm = String::from_utf8_lossy(&long_comm[..Comm::MAX_LEN]);
@@ -599,7 +736,7 @@ mod tests {
         driver.add_file(b"/proc/100/cmdline", content);
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let cmdline = procfs.read_cmdline(100).unwrap();
+        let cmdline = procfs.proc_ref(100).read_cmdline().unwrap();
         assert_eq!(cmdline.as_bytes(), content);
     }
 
@@ -608,7 +745,7 @@ mod tests {
         let driver = MockDriver::new();
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let err = procfs.read_cmdline(100).unwrap_err();
+        let err = procfs.proc_ref(100).read_cmdline().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -619,7 +756,7 @@ mod tests {
         driver.add_file(b"/proc/100/environ", content);
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let env = procfs.read_environ(100).unwrap();
+        let env = procfs.proc_ref(100).read_environ().unwrap();
         assert_eq!(env.as_bytes(), content);
     }
 
@@ -628,7 +765,7 @@ mod tests {
         let driver = MockDriver::new();
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let err = procfs.read_environ(100).unwrap_err();
+        let err = procfs.proc_ref(100).read_environ().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -638,7 +775,7 @@ mod tests {
         driver.add_file(b"/proc/100/loginuid", b"1000");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        assert_eq!(procfs.read_loginuid(100).unwrap(), 1000);
+        assert_eq!(procfs.proc_ref(100).read_loginuid().unwrap(), 1000);
     }
 
     #[test]
@@ -647,7 +784,7 @@ mod tests {
         driver.add_file(b"/proc/100/loginuid", b"1000\n");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        assert_eq!(procfs.read_loginuid(100).unwrap(), 1000);
+        assert_eq!(procfs.proc_ref(100).read_loginuid().unwrap(), 1000);
     }
 
     #[test]
@@ -656,7 +793,7 @@ mod tests {
         driver.add_file(b"/proc/100/loginuid", b"invalid");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        assert!(procfs.read_loginuid(100).is_err());
+        assert!(procfs.proc_ref(100).read_loginuid().is_err());
     }
 
     #[test]
@@ -667,7 +804,7 @@ mod tests {
         driver.add_metadata(b"/proc/100/ns/net", MockMetadata { ino, file_type });
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        assert_eq!(procfs.read_netns_ino(100).unwrap(), ino);
+        assert_eq!(procfs.proc_ref(100).read_netns_ino().unwrap(), ino);
     }
 
     #[test]
@@ -675,44 +812,31 @@ mod tests {
         let driver = MockDriver::new();
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let err = procfs.read_netns_ino(100).unwrap_err();
+        let err = procfs.proc_ref(100).read_netns_ino().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
     fn test_symlink_reads_happy_path() {
         let mut driver = MockDriver::new();
-        struct TestData {
-            path: &'static [u8],
-            expected_target: &'static str,
-            get_target_fn: fn(&Procfs<MockDriver>, u32) -> io::Result<OsPath>,
-        }
-        let tests: Vec<TestData> = vec![
-            TestData {
-                path: b"/proc/100/exe",
-                expected_target: "target_exe",
-                get_target_fn: Procfs::read_exe,
-            },
-            TestData {
-                path: b"/proc/100/cwd",
-                expected_target: "target_cwd",
-                get_target_fn: Procfs::read_cwd,
-            },
-            TestData {
-                path: b"/proc/100/root",
-                expected_target: "target_root",
-                get_target_fn: Procfs::read_root,
-            },
-        ];
-        for test in &tests {
-            driver.add_symlink(test.path, test.expected_target);
-        }
+        driver.add_symlink(b"/proc/100/exe", "target_exe");
+        driver.add_symlink(b"/proc/100/cwd", "target_cwd");
+        driver.add_symlink(b"/proc/100/root", "target_root");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        for test in &tests {
-            let target = (test.get_target_fn)(&procfs, 100).unwrap();
-            assert_eq!(target.as_os_str(), OsStr::new(test.expected_target));
-        }
+        let proc = procfs.proc_ref(100);
+        assert_eq!(
+            proc.read_exe().unwrap().as_os_str(),
+            OsStr::new("target_exe")
+        );
+        assert_eq!(
+            proc.read_cwd().unwrap().as_os_str(),
+            OsStr::new("target_cwd")
+        );
+        assert_eq!(
+            proc.read_root().unwrap().as_os_str(),
+            OsStr::new("target_root")
+        );
     }
 
     #[test]
@@ -720,13 +844,19 @@ mod tests {
         let driver = MockDriver::new();
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        type Helper = fn(&Procfs<MockDriver>, u32) -> io::Result<OsPath>;
-        let get_target_fns: Vec<Helper> =
-            vec![Procfs::read_exe, Procfs::read_cwd, Procfs::read_root];
-        for get_target_fn in get_target_fns {
-            let err = get_target_fn(&procfs, 100).unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        }
+        let proc_ref = procfs.proc_ref(100);
+        assert_eq!(
+            proc_ref.read_exe().unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            proc_ref.read_cwd().unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            proc_ref.read_root().unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]
@@ -750,7 +880,7 @@ mod tests {
                 let mount_path = MountPath::new("/proc".into()).unwrap();
                 let procfs = Procfs::new_with_driver(mount_path, driver);
                 let mut collector = Collector { lines: Vec::new() };
-                let cf = procfs.$method(100, &mut collector).unwrap();
+                let cf = procfs.proc_ref(100).$method(&mut collector).unwrap();
                 assert!(cf.is_continue());
 
                 assert_eq!(
@@ -785,11 +915,114 @@ mod tests {
         let procfs = Procfs::new_with_driver(mount_path, driver);
         let mut entries = Vec::new();
         procfs
-            .scan_fd_dir(100, |entry| {
+            .proc_ref(100)
+            .scan_fd_dir(|entry| {
                 entries.push(entry.clone());
                 Ok(())
             })
             .unwrap();
         assert_eq!(entries, vec![dir_entry]);
+    }
+
+    #[test]
+    fn test_open_proc_fails_on_missing_dir() {
+        let driver = MockDriver::new();
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let err = procfs.open_proc(100).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// Tests that operations involving opening files for reading the content are equivalent on
+    /// [ProcView]s returned by both [Procfs::proc_ref] and [Procfs::open_proc].
+    #[test]
+    fn test_proc_views_open_file_equivalent() {
+        let mut driver = MockDriver::new();
+        driver.add_dir(b"/proc/100/");
+        driver.add_file(b"/proc/100/comm", b"content\n");
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let proc_ref = procfs.proc_ref(100);
+        let open_proc = procfs.open_proc(100).unwrap();
+        let proc_ref_comm = proc_ref.read_comm().unwrap();
+        let open_proc_comm = open_proc.read_comm().unwrap();
+        assert_eq!(proc_ref_comm.as_os_str(), open_proc_comm.as_os_str());
+        assert_eq!(proc_ref_comm.as_os_str(), OsStr::new("content"));
+    }
+
+    /// Tests that operations involving reading file metadata are equivalent on [ProcView]s returned
+    /// by both [Procfs::proc_ref] and [Procfs::open_proc].
+    #[test]
+    fn test_proc_views_read_metadata_equivalent() {
+        let mut driver = MockDriver::new();
+        driver.add_dir(b"/proc/100/");
+        driver.add_metadata(
+            b"/proc/100/ns/net",
+            MockMetadata {
+                ino: 4242,
+                file_type: FileType::Symlink,
+            },
+        );
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let proc_ref = procfs.proc_ref(100);
+        let open_proc = procfs.open_proc(100).unwrap();
+        let proc_ref_netns_ino = proc_ref.read_netns_ino().unwrap();
+        let open_proc_netns_ino = open_proc.read_netns_ino().unwrap();
+        assert_eq!(proc_ref_netns_ino, open_proc_netns_ino);
+        assert_eq!(proc_ref_netns_ino, 4242);
+    }
+
+    /// Tests that operations involving reading symlink targets are equivalent on [ProcView]s
+    /// returned by both [Procfs::proc_ref] and [Procfs::open_proc].
+    #[test]
+    fn test_proc_views_read_symlink_equivalent() {
+        let mut driver = MockDriver::new();
+        driver.add_dir(b"/proc/100/");
+        driver.add_symlink(b"/proc/100/exe", "target_exe");
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let proc_ref = procfs.proc_ref(100);
+        let open_proc = procfs.open_proc(100).unwrap();
+        let proc_ref_exe = proc_ref.read_exe().unwrap();
+        let open_proc_exe = open_proc.read_exe().unwrap();
+        assert_eq!(proc_ref_exe.as_os_str(), open_proc_exe.as_os_str());
+        assert_eq!(proc_ref_exe.as_os_str(), OsStr::new("target_exe"));
+    }
+
+    /// Tests that operations involving scanning directory entries are equivalent on [ProcView]s
+    /// returned by both [Procfs::proc_ref] and [Procfs::open_proc].
+    #[test]
+    fn test_proc_views_scan_dir_equivalent() {
+        let mut driver = MockDriver::new();
+        driver.add_dir(b"/proc/100/");
+        let dir_entry = MockDirEntry {
+            file_name: OsString::from("0"),
+            ino: 12345,
+        };
+        driver.add_dir_entry(b"/proc/100/fd", dir_entry.clone());
+        let mount_path = MountPath::new("/proc".into()).unwrap();
+        let procfs = Procfs::new_with_driver(mount_path, driver);
+        let proc_ref = procfs.proc_ref(100);
+        let open_proc = procfs.open_proc(100).unwrap();
+
+        let mut proc_ref_entries = Vec::new();
+        proc_ref
+            .scan_fd_dir(|e| {
+                proc_ref_entries.push(e.clone());
+                Ok(())
+            })
+            .unwrap();
+
+        let mut open_proc_entries = Vec::new();
+        open_proc
+            .scan_fd_dir(|e| {
+                open_proc_entries.push(e.clone());
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(proc_ref_entries, open_proc_entries);
+        assert_eq!(proc_ref_entries, vec![dir_entry]);
     }
 }

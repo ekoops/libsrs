@@ -102,6 +102,19 @@ pub fn open_file_rdonly(loc: Location<'_, '_>) -> io::Result<File> {
     Ok(File(std_fs::File::from(fd)))
 }
 
+/// Opens the directory at `loc` for traversal and returns an [OwnedFd] for it.
+///
+/// The directory is opened in read-only mode, and the returned file descriptor can only be used on
+/// operations that use `*at` system calls under the hood.
+pub fn open_dir_for_traversal(loc: Location<'_, '_>) -> io::Result<OwnedFd> {
+    openat(
+        loc.fd,
+        loc.path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::PATH | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+}
+
 /// File type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileType {
