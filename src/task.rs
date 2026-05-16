@@ -7,6 +7,7 @@ use std::cmp;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io;
+use std::num::NonZeroU32;
 use std::ops::{ControlFlow, Deref};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -323,7 +324,7 @@ pub struct Task {
 
 impl Task {
     /// Create [Self] for `pid` by gathering data from `procfs`.
-    pub fn from_procfs(procfs: &Procfs, pid: u32) -> io::Result<Self> {
+    pub fn from_procfs(procfs: &Procfs, pid: NonZeroU32) -> io::Result<Self> {
         let mut procfs_status = TaskProcfsStatus::default();
         let proc = procfs.open_proc(pid)?;
         let _cf = proc.scan_status(|line: &[u8]| procfs_status.update_from_line(line))?;

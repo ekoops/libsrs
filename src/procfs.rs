@@ -6,6 +6,7 @@ use crate::{parse, read, write};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsString};
 use std::io;
+use std::num::NonZeroU32;
 use std::ops::ControlFlow;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -227,9 +228,9 @@ impl<D: Driver> Procfs<D> {
     /// it.
     ///
     /// Use [Self::proc_ref] if you need to perform just a single operation on a subtree.
-    pub fn open_proc(&self, pid: u32) -> io::Result<ProcView<'_, D>> {
+    pub fn open_proc(&self, pid: NonZeroU32) -> io::Result<ProcView<'_, D>> {
         let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid, c"");
+        let path = self.write_proc_file_path(&mut path_buff, pid.get(), c"");
         let dir_handle = self.driver.open_dir(None, path)?;
         Ok(ProcView {
             procfs: self,
@@ -241,7 +242,7 @@ impl<D: Driver> Procfs<D> {
     /// subtree.
     ///
     /// Use [Self::open_proc] if you need to perform multiple operations on the same subtree.
-    pub fn proc_ref(&self, pid: u32) -> ProcView<'_, D> {
+    pub fn proc_ref(&self, pid: NonZeroU32) -> ProcView<'_, D> {
         ProcView {
             procfs: self,
             proc_ref: ProcRef::Pid(pid),
@@ -255,7 +256,7 @@ impl<D: Driver> Procfs<D> {
         match proc_ref {
             ProcRef::Pid(pid) => {
                 let mut path_buff = Self::new_path_buff();
-                let path = self.write_proc_file_path(&mut path_buff, *pid, path);
+                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path);
                 self.driver.open(None, path)
             }
             ProcRef::Anchored(fd) => self.driver.open(Some(fd), path),
@@ -273,7 +274,7 @@ impl<D: Driver> Procfs<D> {
         match proc_ref {
             ProcRef::Pid(pid) => {
                 let mut path_buff = Self::new_path_buff();
-                let path = self.write_proc_file_path(&mut path_buff, *pid, path);
+                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path);
                 self.driver.read_metadata(None, path)
             }
             ProcRef::Anchored(fd) => self.driver.read_metadata(Some(fd), path),
@@ -288,7 +289,7 @@ impl<D: Driver> Procfs<D> {
             match proc_ref {
                 ProcRef::Pid(pid) => {
                     let mut path_buff = Self::new_path_buff();
-                    let path = self.write_proc_file_path(&mut path_buff, *pid, path);
+                    let path = self.write_proc_file_path(&mut path_buff, pid.get(), path);
                     self.driver.read_symlink(None, path, buff)
                 }
                 ProcRef::Anchored(fd) => self.driver.read_symlink(Some(fd), path, buff),
@@ -316,7 +317,7 @@ impl<D: Driver> Procfs<D> {
         match proc_ref {
             ProcRef::Pid(pid) => {
                 let mut path_buff = Self::new_path_buff();
-                let path = self.write_proc_file_path(&mut path_buff, *pid, path);
+                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path);
                 self.driver.scan_dir(None, path, process)
             }
             ProcRef::Anchored(fd) => self.driver.scan_dir(Some(fd), path, process),
@@ -327,7 +328,7 @@ impl<D: Driver> Procfs<D> {
 /// A reference to a `<procfs_mount_path>/<pid>` process' procfs subtree.
 #[derive(Debug)]
 enum ProcRef<A> {
-    Pid(u32),
+    Pid(NonZeroU32),
     Anchored(A),
 }
 
@@ -471,6 +472,8 @@ mod tests {
     use std::ffi::OsStr;
     use std::io::Cursor;
     use std::ops::ControlFlow;
+
+    const PID: NonZeroU32 = NonZeroU32::new(100).unwrap();
 
     #[test]
     fn test_mount_path_new_happy_path() {
@@ -701,7 +704,7 @@ mod tests {
         driver.add_file(b"/proc/100/comm", b"content\n");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let comm = procfs.proc_ref(100).read_comm().unwrap();
+        let comm = procfs.proc_ref(PID).read_comm().unwrap();
         assert_eq!(comm.as_os_str(), OsStr::new("content"));
     }
 
@@ -711,7 +714,7 @@ mod tests {
         driver.add_file(b"/proc/100/comm", b"content");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let comm = procfs.proc_ref(100).read_comm().unwrap();
+        let comm = procfs.proc_ref(PID).read_comm().unwrap();
         assert_eq!(comm.as_os_str(), OsStr::new("content"));
     }
 
@@ -722,7 +725,7 @@ mod tests {
         driver.add_file(b"/proc/100/comm", long_comm);
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let comm = procfs.proc_ref(100).read_comm().unwrap();
+        let comm = procfs.proc_ref(PID).read_comm().unwrap();
         let comm_str = comm.as_os_str().to_string_lossy();
         assert_eq!(comm_str.len(), Comm::MAX_LEN);
         let truncated_comm = String::from_utf8_lossy(&long_comm[..Comm::MAX_LEN]);
@@ -736,7 +739,7 @@ mod tests {
         driver.add_file(b"/proc/100/cmdline", content);
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let cmdline = procfs.proc_ref(100).read_cmdline().unwrap();
+        let cmdline = procfs.proc_ref(PID).read_cmdline().unwrap();
         assert_eq!(cmdline.as_bytes(), content);
     }
 
@@ -745,7 +748,7 @@ mod tests {
         let driver = MockDriver::new();
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let err = procfs.proc_ref(100).read_cmdline().unwrap_err();
+        let err = procfs.proc_ref(PID).read_cmdline().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -756,7 +759,7 @@ mod tests {
         driver.add_file(b"/proc/100/environ", content);
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let env = procfs.proc_ref(100).read_environ().unwrap();
+        let env = procfs.proc_ref(PID).read_environ().unwrap();
         assert_eq!(env.as_bytes(), content);
     }
 
@@ -765,7 +768,7 @@ mod tests {
         let driver = MockDriver::new();
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let err = procfs.proc_ref(100).read_environ().unwrap_err();
+        let err = procfs.proc_ref(PID).read_environ().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -775,7 +778,7 @@ mod tests {
         driver.add_file(b"/proc/100/loginuid", b"1000");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        assert_eq!(procfs.proc_ref(100).read_loginuid().unwrap(), 1000);
+        assert_eq!(procfs.proc_ref(PID).read_loginuid().unwrap(), 1000);
     }
 
     #[test]
@@ -784,7 +787,7 @@ mod tests {
         driver.add_file(b"/proc/100/loginuid", b"1000\n");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        assert_eq!(procfs.proc_ref(100).read_loginuid().unwrap(), 1000);
+        assert_eq!(procfs.proc_ref(PID).read_loginuid().unwrap(), 1000);
     }
 
     #[test]
@@ -793,7 +796,7 @@ mod tests {
         driver.add_file(b"/proc/100/loginuid", b"invalid");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        assert!(procfs.proc_ref(100).read_loginuid().is_err());
+        assert!(procfs.proc_ref(PID).read_loginuid().is_err());
     }
 
     #[test]
@@ -804,7 +807,7 @@ mod tests {
         driver.add_metadata(b"/proc/100/ns/net", MockMetadata { ino, file_type });
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        assert_eq!(procfs.proc_ref(100).read_netns_ino().unwrap(), ino);
+        assert_eq!(procfs.proc_ref(PID).read_netns_ino().unwrap(), ino);
     }
 
     #[test]
@@ -812,7 +815,7 @@ mod tests {
         let driver = MockDriver::new();
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let err = procfs.proc_ref(100).read_netns_ino().unwrap_err();
+        let err = procfs.proc_ref(PID).read_netns_ino().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -824,17 +827,17 @@ mod tests {
         driver.add_symlink(b"/proc/100/root", "target_root");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let proc = procfs.proc_ref(100);
+        let proc_ref = procfs.proc_ref(PID);
         assert_eq!(
-            proc.read_exe().unwrap().as_os_str(),
+            proc_ref.read_exe().unwrap().as_os_str(),
             OsStr::new("target_exe")
         );
         assert_eq!(
-            proc.read_cwd().unwrap().as_os_str(),
+            proc_ref.read_cwd().unwrap().as_os_str(),
             OsStr::new("target_cwd")
         );
         assert_eq!(
-            proc.read_root().unwrap().as_os_str(),
+            proc_ref.read_root().unwrap().as_os_str(),
             OsStr::new("target_root")
         );
     }
@@ -844,7 +847,7 @@ mod tests {
         let driver = MockDriver::new();
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let proc_ref = procfs.proc_ref(100);
+        let proc_ref = procfs.proc_ref(PID);
         assert_eq!(
             proc_ref.read_exe().unwrap_err().kind(),
             io::ErrorKind::NotFound
@@ -880,7 +883,7 @@ mod tests {
                 let mount_path = MountPath::new("/proc".into()).unwrap();
                 let procfs = Procfs::new_with_driver(mount_path, driver);
                 let mut collector = Collector { lines: Vec::new() };
-                let cf = procfs.proc_ref(100).$method(&mut collector).unwrap();
+                let cf = procfs.proc_ref(PID).$method(&mut collector).unwrap();
                 assert!(cf.is_continue());
 
                 assert_eq!(
@@ -915,7 +918,7 @@ mod tests {
         let procfs = Procfs::new_with_driver(mount_path, driver);
         let mut entries = Vec::new();
         procfs
-            .proc_ref(100)
+            .proc_ref(PID)
             .scan_fd_dir(|entry| {
                 entries.push(entry.clone());
                 Ok(())
@@ -929,7 +932,7 @@ mod tests {
         let driver = MockDriver::new();
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let err = procfs.open_proc(100).unwrap_err();
+        let err = procfs.open_proc(PID).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -942,8 +945,8 @@ mod tests {
         driver.add_file(b"/proc/100/comm", b"content\n");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let proc_ref = procfs.proc_ref(100);
-        let open_proc = procfs.open_proc(100).unwrap();
+        let proc_ref = procfs.proc_ref(PID);
+        let open_proc = procfs.open_proc(PID).unwrap();
         let proc_ref_comm = proc_ref.read_comm().unwrap();
         let open_proc_comm = open_proc.read_comm().unwrap();
         assert_eq!(proc_ref_comm.as_os_str(), open_proc_comm.as_os_str());
@@ -965,8 +968,8 @@ mod tests {
         );
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let proc_ref = procfs.proc_ref(100);
-        let open_proc = procfs.open_proc(100).unwrap();
+        let proc_ref = procfs.proc_ref(PID);
+        let open_proc = procfs.open_proc(PID).unwrap();
         let proc_ref_netns_ino = proc_ref.read_netns_ino().unwrap();
         let open_proc_netns_ino = open_proc.read_netns_ino().unwrap();
         assert_eq!(proc_ref_netns_ino, open_proc_netns_ino);
@@ -982,8 +985,8 @@ mod tests {
         driver.add_symlink(b"/proc/100/exe", "target_exe");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let proc_ref = procfs.proc_ref(100);
-        let open_proc = procfs.open_proc(100).unwrap();
+        let proc_ref = procfs.proc_ref(PID);
+        let open_proc = procfs.open_proc(PID).unwrap();
         let proc_ref_exe = proc_ref.read_exe().unwrap();
         let open_proc_exe = open_proc.read_exe().unwrap();
         assert_eq!(proc_ref_exe.as_os_str(), open_proc_exe.as_os_str());
@@ -1003,8 +1006,8 @@ mod tests {
         driver.add_dir_entry(b"/proc/100/fd", dir_entry.clone());
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
-        let proc_ref = procfs.proc_ref(100);
-        let open_proc = procfs.open_proc(100).unwrap();
+        let proc_ref = procfs.proc_ref(PID);
+        let open_proc = procfs.open_proc(PID).unwrap();
 
         let mut proc_ref_entries = Vec::new();
         proc_ref
