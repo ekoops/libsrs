@@ -327,7 +327,7 @@ impl<D: Driver> Procfs<D> {
 
 /// A reference to a `<procfs_mount_path>/<pid>` process' procfs subtree.
 #[derive(Debug)]
-enum ProcRef<A> {
+enum ProcRef<A = OwnedFd> {
     Pid(NonZeroU32),
     Anchored(A),
 }
@@ -335,7 +335,7 @@ enum ProcRef<A> {
 /// A view of a `<procfs_mount_path>/<pid>` process' procfs subtree, allowing to extract information
 /// from it.
 #[derive(Debug)]
-pub struct ProcView<'procfs, D: Driver> {
+pub struct ProcView<'procfs, D: Driver = RealDriver> {
     procfs: &'procfs Procfs<D>,
     proc_ref: ProcRef<D::DirHandle>,
 }
