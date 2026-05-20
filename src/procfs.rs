@@ -249,18 +249,32 @@ impl<D: Driver> Procfs<D> {
         }
     }
 
-    /// Creates a reader for the `path`.
+    /// Calls `op` with the directory handle and the path inferred from `proc_ref` and `path`.
     ///
     /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
-    fn open(&self, proc_ref: &ProcRef<D::DirHandle>, path: &CStr) -> io::Result<D::Reader> {
+    fn with_path<R, F: FnOnce(Option<&D::DirHandle>, &CStr) -> io::Result<R>>(
+        &self,
+        proc_ref: &ProcRef<D::DirHandle>,
+        path: &CStr,
+        op: F,
+    ) -> io::Result<R> {
         match proc_ref {
             ProcRef::Pid(pid) => {
                 let mut path_buff = Self::new_path_buff();
                 let path = self.write_proc_file_path(&mut path_buff, pid.get(), path)?;
-                self.driver.open(None, path)
+                op(None, path)
             }
-            ProcRef::Anchored(fd) => self.driver.open(Some(fd), path),
+            ProcRef::Anchored(dir_handle) => op(Some(dir_handle), path),
         }
+    }
+
+    /// Creates a reader for the `path`.
+    ///
+    /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
+    fn open(&self, proc_ref: &ProcRef<D::DirHandle>, path: &CStr) -> io::Result<D::Reader> {
+        self.with_path(proc_ref, path, |dir_handle, path| {
+            self.driver.open(dir_handle, path)
+        })
     }
 
     /// Returns metadata associated with `path`.
@@ -271,29 +285,19 @@ impl<D: Driver> Procfs<D> {
         proc_ref: &ProcRef<D::DirHandle>,
         path: &CStr,
     ) -> io::Result<D::Metadata> {
-        match proc_ref {
-            ProcRef::Pid(pid) => {
-                let mut path_buff = Self::new_path_buff();
-                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path)?;
-                self.driver.read_metadata(None, path)
-            }
-            ProcRef::Anchored(fd) => self.driver.read_metadata(Some(fd), path),
-        }
+        self.with_path(proc_ref, path, |dir_handle, path| {
+            self.driver.read_metadata(dir_handle, path)
+        })
     }
 
     /// Returns the content of the symbolic link `path`.
     ///
     /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
     fn read_symlink(&self, proc_ref: &ProcRef<D::DirHandle>, path: &CStr) -> io::Result<OsPath> {
-        OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
-            match proc_ref {
-                ProcRef::Pid(pid) => {
-                    let mut path_buff = Self::new_path_buff();
-                    let path = self.write_proc_file_path(&mut path_buff, pid.get(), path)?;
-                    self.driver.read_symlink(None, path, buff)
-                }
-                ProcRef::Anchored(fd) => self.driver.read_symlink(Some(fd), path, buff),
-            }
+        self.with_path(proc_ref, path, |dir_handle, path| {
+            OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
+                self.driver.read_symlink(dir_handle, path, buff)
+            })
         })
     }
 
@@ -314,14 +318,9 @@ impl<D: Driver> Procfs<D> {
     where
         P: FnMut(&D::DirEntry<'_>) -> io::Result<()>,
     {
-        match proc_ref {
-            ProcRef::Pid(pid) => {
-                let mut path_buff = Self::new_path_buff();
-                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path)?;
-                self.driver.scan_dir(None, path, process)
-            }
-            ProcRef::Anchored(fd) => self.driver.scan_dir(Some(fd), path, process),
-        }
+        self.with_path(proc_ref, path, |dir_handle, path| {
+            self.driver.scan_dir(dir_handle, path, process)
+        })
     }
 }
 
