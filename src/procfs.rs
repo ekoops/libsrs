@@ -1,8 +1,8 @@
-use crate::buffer_writer::FromBufferWriter;
+use crate::buffer_writer::{BufferWriter, FromBufferWriter};
 use crate::fs::{self, DirEntry, File, Location, Metadata, MetadataExt};
 use crate::read::LineProcessor;
 use crate::task::{Cmdline, Comm, Environ, OsPath};
-use crate::{parse, read, write};
+use crate::{parse, read};
 use lexical_core::FormattedSize;
 use std::ffi::{CStr, CString, NulError, OsString};
 use std::io;
@@ -212,16 +212,16 @@ impl<D: Driver> Procfs<D> {
         path_buff: &'a mut [u8],
         pid: u32,
         suffix: &CStr,
-    ) -> &'a CStr {
+    ) -> io::Result<&'a CStr> {
         let buff = &mut &mut path_buff[..];
-        let mut written_bytes = write::next_bytes(buff, self.mount_path.0.to_bytes());
-        written_bytes += write::next_bytes(buff, b"/");
-        written_bytes += write::next_dec(buff, pid);
-        written_bytes += write::next_bytes(buff, b"/");
-        written_bytes += write::next_bytes(buff, suffix.to_bytes_with_nul());
+        let mut written_bytes = self.mount_path.0.to_bytes().write_next_to_buff(buff)?;
+        written_bytes += b"/".write_next_to_buff(buff)?;
+        written_bytes += pid.write_next_to_buff(buff)?;
+        written_bytes += b"/".write_next_to_buff(buff)?;
+        written_bytes += suffix.to_bytes_with_nul().write_next_to_buff(buff)?;
         // SAFETY: write::next_bytes(buff, filename.to_bytes_with_nul()) guarantees that a trailing
         // NUL byte is written into the buffer.
-        unsafe { CStr::from_bytes_with_nul_unchecked(&path_buff[..written_bytes]) }
+        Ok(unsafe { CStr::from_bytes_with_nul_unchecked(&path_buff[..written_bytes]) })
     }
 
     /// Opens the `<procfs_mount_path>/<pid>` process' procfs subtree and returns a [ProcView] of
@@ -230,7 +230,7 @@ impl<D: Driver> Procfs<D> {
     /// Use [Self::proc_ref] if you need to perform just a single operation on a subtree.
     pub fn open_proc(&self, pid: NonZeroU32) -> io::Result<ProcView<'_, D>> {
         let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid.get(), c"");
+        let path = self.write_proc_file_path(&mut path_buff, pid.get(), c"")?;
         let dir_handle = self.driver.open_dir(None, path)?;
         Ok(ProcView {
             procfs: self,
@@ -256,7 +256,7 @@ impl<D: Driver> Procfs<D> {
         match proc_ref {
             ProcRef::Pid(pid) => {
                 let mut path_buff = Self::new_path_buff();
-                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path);
+                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path)?;
                 self.driver.open(None, path)
             }
             ProcRef::Anchored(fd) => self.driver.open(Some(fd), path),
@@ -274,7 +274,7 @@ impl<D: Driver> Procfs<D> {
         match proc_ref {
             ProcRef::Pid(pid) => {
                 let mut path_buff = Self::new_path_buff();
-                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path);
+                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path)?;
                 self.driver.read_metadata(None, path)
             }
             ProcRef::Anchored(fd) => self.driver.read_metadata(Some(fd), path),
@@ -289,7 +289,7 @@ impl<D: Driver> Procfs<D> {
             match proc_ref {
                 ProcRef::Pid(pid) => {
                     let mut path_buff = Self::new_path_buff();
-                    let path = self.write_proc_file_path(&mut path_buff, pid.get(), path);
+                    let path = self.write_proc_file_path(&mut path_buff, pid.get(), path)?;
                     self.driver.read_symlink(None, path, buff)
                 }
                 ProcRef::Anchored(fd) => self.driver.read_symlink(Some(fd), path, buff),
@@ -317,7 +317,7 @@ impl<D: Driver> Procfs<D> {
         match proc_ref {
             ProcRef::Pid(pid) => {
                 let mut path_buff = Self::new_path_buff();
-                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path);
+                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path)?;
                 self.driver.scan_dir(None, path, process)
             }
             ProcRef::Anchored(fd) => self.driver.scan_dir(Some(fd), path, process),

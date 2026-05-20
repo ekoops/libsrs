@@ -1,3 +1,5 @@
+use lexical_core::{NumberFormatBuilder, ToLexicalWithOptions};
+use std::ffi::CStr;
 use std::{io, mem};
 
 /// Updates `*buff` to point to `n`-th element from the current position.
@@ -30,6 +32,33 @@ where
 {
     fn write_to_buff(self, buff: &mut [T]) -> io::Result<usize> {
         self(buff)
+    }
+}
+
+// note: implementing this for `T: ToLexicalWithOptions` creates conflict with the blanket
+// implementation for closures (as in theory `T` can be both at the same time), so just implement
+// `BufferWriter<u8>` for `u32` for the moment.
+impl BufferWriter<u8> for u32 {
+    fn write_to_buff(self, buff: &mut [u8]) -> io::Result<usize> {
+        let options = <u32 as ToLexicalWithOptions>::Options::default();
+        const DEC_FORMAT: u128 = NumberFormatBuilder::decimal();
+        let num_bytes = lexical_core::write_with_options::<u32, DEC_FORMAT>(self, buff, &options);
+        let written_bytes = num_bytes.len();
+        Ok(written_bytes)
+    }
+}
+
+impl BufferWriter<u8> for &[u8] {
+    fn write_to_buff(self, buff: &mut [u8]) -> io::Result<usize> {
+        let bytes_len = self.len();
+        buff[..bytes_len].copy_from_slice(self);
+        Ok(bytes_len)
+    }
+}
+
+impl BufferWriter<u8> for &CStr {
+    fn write_to_buff(self, buff: &mut [u8]) -> io::Result<usize> {
+        self.to_bytes().write_to_buff(buff)
     }
 }
 
