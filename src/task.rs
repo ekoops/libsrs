@@ -35,7 +35,7 @@ impl FromBufferWriter<u8> for Comm {
     fn from_buffer_writer<W: BufferWriter<u8>>(writer: W) -> io::Result<Self> {
         let mut comm = Self::default();
         let buff = &mut comm.0[1..];
-        let written_bytes = writer.write(buff)?;
+        let written_bytes = writer.write_to_buff(buff)?;
         // Cap written bytes to be sure it is not bigger than buffer size.
         let capped_written_bytes = cmp::min(written_bytes, buff.len());
         comm.0[0] = capped_written_bytes as u8;
@@ -140,7 +140,7 @@ impl FromBufferWriter<u32> for PidNamespaceIds {
     fn from_buffer_writer<W: BufferWriter<u32>>(writer: W) -> io::Result<Self> {
         let mut ns_ids = Self::default();
         let ids = &mut ns_ids.ids[..];
-        let written_ids = writer.write(ids)?;
+        let written_ids = writer.write_to_buff(ids)?;
         // Cap written IDs to be sure it is not bigger than maximum number of supported IDs.
         let written_ids = cmp::min(written_ids, ids.len());
         if written_ids == 0 {
