@@ -205,32 +205,20 @@ impl<D: Driver> Procfs<D> {
         [0u8; PATH_BUFF_SIZE]
     }
 
-    /// Writes the mount path, `pid` and `filename` into `buff`, separating them with `/`s, and
-    /// and returns a [CStr] view of it.
-    fn write_proc_file_path<'a>(
-        &self,
-        path_buff: &'a mut [u8],
-        pid: u32,
-        suffix: &CStr,
-    ) -> io::Result<&'a CStr> {
-        let buff = &mut &mut path_buff[..];
-        let mut written_bytes = self.mount_path.0.to_bytes().write_next_to_buff(buff)?;
-        written_bytes += b"/".write_next_to_buff(buff)?;
-        written_bytes += pid.write_next_to_buff(buff)?;
-        written_bytes += b"/".write_next_to_buff(buff)?;
-        written_bytes += suffix.to_bytes_with_nul().write_next_to_buff(buff)?;
-        // SAFETY: write::next_bytes(buff, filename.to_bytes_with_nul()) guarantees that a trailing
-        // NUL byte is written into the buffer.
-        Ok(unsafe { CStr::from_bytes_with_nul_unchecked(&path_buff[..written_bytes]) })
-    }
-
     /// Opens the `<procfs_mount_path>/<pid>` process' procfs subtree and returns a [ProcView] of
     /// it.
     ///
     /// Use [Self::proc_ref] if you need to perform just a single operation on a subtree.
     pub fn open_proc(&self, pid: NonZeroU32) -> io::Result<ProcView<'_, D>> {
         let mut path_buff = Self::new_path_buff();
-        let path = self.write_proc_file_path(&mut path_buff, pid.get(), c"")?;
+        // -1 guarantees that at least 1 trailing NUL byte remain in the buffer.
+        let buff = &mut &mut path_buff[..PATH_BUFF_SIZE - 1];
+        let mut written_bytes = self.mount_path.0.to_bytes().write_next_to_buff(buff)?;
+        written_bytes += b"/".write_next_to_buff(buff)?;
+        written_bytes += pid.get().write_next_to_buff(buff)?;
+        debug_assert!(written_bytes < PATH_BUFF_SIZE);
+        let path = CStr::from_bytes_until_nul(&path_buff[..written_bytes + 1])
+            .expect("trailing NUL guaranteed by construction");
         let dir_handle = self.driver.open_dir(None, path)?;
         Ok(ProcView {
             procfs: self,
@@ -249,76 +237,106 @@ impl<D: Driver> Procfs<D> {
         }
     }
 
-    /// Calls `op` with the directory handle and the path inferred from `proc_ref` and `path`.
+    /// Calls `op` with the directory handle inferred from `proc_ref` and with the path produced by
+    /// leveraging both `proc_ref` and `path_writer`.
     ///
-    /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
-    fn with_path<R, F: FnOnce(Option<&D::DirHandle>, &CStr) -> io::Result<R>>(
+    /// `path_writer` must produce a non-empty path that is relative to the process' procfs subtree
+    /// identified by `proc_ref`.
+    fn with_path<R, W, O>(
         &self,
         proc_ref: &ProcRef<D::DirHandle>,
-        path: &CStr,
-        op: F,
-    ) -> io::Result<R> {
-        match proc_ref {
+        path_writer: W,
+        op: O,
+    ) -> io::Result<R>
+    where
+        W: BufferWriter<u8>,
+        O: FnOnce(Option<&D::DirHandle>, &CStr) -> io::Result<R>,
+    {
+        let mut path_buff = Self::new_path_buff();
+        // -1 guarantees that at least 1 trailing NUL byte remain in the buffer.
+        let buff = &mut &mut path_buff[..PATH_BUFF_SIZE - 1];
+        let mut written_bytes = 0;
+        let dir_handle = match proc_ref {
             ProcRef::Pid(pid) => {
-                let mut path_buff = Self::new_path_buff();
-                let path = self.write_proc_file_path(&mut path_buff, pid.get(), path)?;
-                op(None, path)
+                written_bytes += self.mount_path.0.to_bytes().write_next_to_buff(buff)?;
+                written_bytes += b"/".write_next_to_buff(buff)?;
+                written_bytes += pid.get().write_next_to_buff(buff)?;
+                written_bytes += b"/".write_next_to_buff(buff)?;
+                None
             }
-            ProcRef::Anchored(dir_handle) => op(Some(dir_handle), path),
-        }
+            ProcRef::Anchored(dir_handle) => Some(dir_handle),
+        };
+        let suffix_bytes = path_writer.write_next_to_buff(buff)?;
+        debug_assert!(suffix_bytes > 0);
+        written_bytes += suffix_bytes;
+        debug_assert!(written_bytes < PATH_BUFF_SIZE);
+        // note: +1 guarantees the presence of at least 1 trailing NUL byte.
+        let path = CStr::from_bytes_until_nul(&path_buff[..written_bytes + 1])
+            .expect("trailing NUL guaranteed by construction");
+        op(dir_handle, path)
     }
 
-    /// Creates a reader for the `path`.
+    /// Creates a reader for the path obtained from `path_writer`.
     ///
-    /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
-    fn open(&self, proc_ref: &ProcRef<D::DirHandle>, path: &CStr) -> io::Result<D::Reader> {
-        self.with_path(proc_ref, path, |dir_handle, path| {
+    /// The obtained path must be relative to the process' procfs subtree identified by `proc_ref`.
+    fn open<W: BufferWriter<u8>>(
+        &self,
+        proc_ref: &ProcRef<D::DirHandle>,
+        path_writer: W,
+    ) -> io::Result<D::Reader> {
+        self.with_path(proc_ref, path_writer, |dir_handle, path| {
             self.driver.open(dir_handle, path)
         })
     }
 
-    /// Returns metadata associated with `path`.
+    /// Returns metadata associated with the path obtained from `path_writer`.
     ///
-    /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
-    fn read_metadata(
+    /// The obtained path must be relative to the process' procfs subtree identified by `proc_ref`.
+    fn read_metadata<W: BufferWriter<u8>>(
         &self,
         proc_ref: &ProcRef<D::DirHandle>,
-        path: &CStr,
+        path_writer: W,
     ) -> io::Result<D::Metadata> {
-        self.with_path(proc_ref, path, |dir_handle, path| {
+        self.with_path(proc_ref, path_writer, |dir_handle, path| {
             self.driver.read_metadata(dir_handle, path)
         })
     }
 
-    /// Returns the content of the symbolic link `path`.
+    /// Returns the content of the symbolic link path obtained from `path_writer`.
     ///
-    /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
-    fn read_symlink(&self, proc_ref: &ProcRef<D::DirHandle>, path: &CStr) -> io::Result<OsPath> {
-        self.with_path(proc_ref, path, |dir_handle, path| {
+    /// The obtained path must be relative to the process' procfs subtree identified by `proc_ref`.
+    fn read_symlink<W: BufferWriter<u8>>(
+        &self,
+        proc_ref: &ProcRef<D::DirHandle>,
+        path_writer: W,
+    ) -> io::Result<OsPath> {
+        self.with_path(proc_ref, path_writer, |dir_handle, path| {
             OsPath::from_buffer_writer(|buff: &mut [u8]| -> io::Result<usize> {
                 self.driver.read_symlink(dir_handle, path, buff)
             })
         })
     }
 
-    /// Iterates over the entries in `path`, invoking `process` for each of them.
+    /// Iterates over the entries of the path obtained from `path_writer`, invoking `process` for
+    /// each of them.
     ///
-    /// `path` is relative to the process' procfs subtree identified by `proc_ref`.
+    /// The obtained path must be relative to the process' procfs subtree identified by `proc_ref`.
     /// `process` is not invoked for `.` and `..` entries.
     ///
     /// # Errors
     ///
     /// Returns an error if the directory cannot be opened or if the callback returns an error.
-    fn scan_dir<P>(
+    fn scan_dir<W, P>(
         &self,
         proc_ref: &ProcRef<D::DirHandle>,
-        path: &CStr,
+        path_writer: W,
         process: P,
     ) -> io::Result<()>
     where
+        W: BufferWriter<u8>,
         P: FnMut(&D::DirEntry<'_>) -> io::Result<()>,
     {
-        self.with_path(proc_ref, path, |dir_handle, path| {
+        self.with_path(proc_ref, path_writer, |dir_handle, path| {
             self.driver.scan_dir(dir_handle, path, process)
         })
     }
@@ -940,7 +958,7 @@ mod tests {
     #[test]
     fn test_proc_views_open_file_equivalent() {
         let mut driver = MockDriver::new();
-        driver.add_dir(b"/proc/100/");
+        driver.add_dir(b"/proc/100");
         driver.add_file(b"/proc/100/comm", b"content\n");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
@@ -957,7 +975,7 @@ mod tests {
     #[test]
     fn test_proc_views_read_metadata_equivalent() {
         let mut driver = MockDriver::new();
-        driver.add_dir(b"/proc/100/");
+        driver.add_dir(b"/proc/100");
         driver.add_metadata(
             b"/proc/100/ns/net",
             MockMetadata {
@@ -980,7 +998,7 @@ mod tests {
     #[test]
     fn test_proc_views_read_symlink_equivalent() {
         let mut driver = MockDriver::new();
-        driver.add_dir(b"/proc/100/");
+        driver.add_dir(b"/proc/100");
         driver.add_symlink(b"/proc/100/exe", "target_exe");
         let mount_path = MountPath::new("/proc".into()).unwrap();
         let procfs = Procfs::new_with_driver(mount_path, driver);
@@ -997,7 +1015,7 @@ mod tests {
     #[test]
     fn test_proc_views_scan_dir_equivalent() {
         let mut driver = MockDriver::new();
-        driver.add_dir(b"/proc/100/");
+        driver.add_dir(b"/proc/100");
         let dir_entry = MockDirEntry {
             file_name: OsString::from("0"),
             ino: 12345,
