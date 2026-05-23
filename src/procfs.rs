@@ -366,6 +366,9 @@ const STATUS_SCAN_BUFF_SIZE: usize = 4 * 1024;
 /// The size of the stack-allocated scratch buffer used to read the content of socket table files
 /// (e.g.: `<procfs_mount_path>/<pid>/net/tcp`).
 const SOCKET_TABLE_SCAN_BUFF_SIZE: usize = 32 * 1024;
+/// The size of the stack-allocated scratch buffer used to read the content of fdinfo files (i.e.:
+/// `<procfs_mount_path>/<pid>/fdinfo/<fd>`).
+const FDINFO_FD_SCAN_BUFF_SIZE: usize = 4 * 1024;
 
 macro_rules! scan_impl {
     ($fn_name:ident, $path:literal, $buff_size:ident) => {
@@ -479,6 +482,25 @@ impl<D: Driver> ProcView<'_, D> {
     scan_impl!(scan_net_raw6, "net/raw6", SOCKET_TABLE_SCAN_BUFF_SIZE);
     scan_impl!(scan_net_unix, "net/unix", SOCKET_TABLE_SCAN_BUFF_SIZE);
     scan_impl!(scan_net_netlink, "net/netlink", SOCKET_TABLE_SCAN_BUFF_SIZE);
+
+    /// Scans each line of `<procfs_mount_path>/<pid>/fdinfo/<fd>` and passes it to
+    /// `line_processor`.
+    pub fn scan_fdinfo_fd<P>(&self, fd: u32, line_processor: P) -> io::Result<ControlFlow<()>>
+    where
+        P: LineProcessor,
+    {
+        let mut reader = self.procfs.open(
+            &self.proc_ref,
+            |path_buff: &mut [u8]| -> io::Result<usize> {
+                let buff = &mut &mut path_buff[..];
+                let mut written_bytes = b"fdinfo/".write_next_to_buff(buff)?;
+                written_bytes += fd.write_next_to_buff(buff)?;
+                Ok(written_bytes)
+            },
+        )?;
+        let mut buff = [0u8; FDINFO_FD_SCAN_BUFF_SIZE];
+        read::scan_lines(&mut reader, &mut buff, line_processor)
+    }
 }
 
 #[cfg(test)]
@@ -921,6 +943,24 @@ mod tests {
         check!(scan_net_raw6, b"net/raw6", "raw6\ntrunc", ["raw6"]);
         check!(scan_net_unix, b"net/unix", "unix\ntrunc", ["unix"]);
         check!(scan_net_netlink, b"net/netlink", "nl\ntrunc", ["nl"]);
+        {
+            let mut driver = MockDriver::new();
+            let path = b"/proc/100/fdinfo/3".to_vec();
+            driver.add_file(path, "fdinfo_3\ntrunc");
+            let mount_path = MountPath::new("/proc".into()).unwrap();
+            let procfs = Procfs::new_with_driver(mount_path, driver);
+            let mut collector = Collector { lines: Vec::new() };
+            let cf = procfs
+                .proc_ref(PID)
+                .scan_fdinfo_fd(3, &mut collector)
+                .unwrap();
+            assert!(cf.is_continue());
+            assert_eq!(
+                collector.lines.as_slice(),
+                ["fdinfo_3"],
+                "Mismatch for fdinfo/3",
+            );
+        }
     }
 
     #[test]
