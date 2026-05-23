@@ -17,7 +17,7 @@ impl TryFrom<u16> for EventType {
         match value {
             x if x == EventType::Type1 as u16 => Ok(EventType::Type1),
             x if x == EventType::Type2 as u16 => Ok(EventType::Type2),
-            _ => Err(UnknownEventTypeError(value))
+            _ => Err(UnknownEventTypeError(value)),
         }
     }
 }

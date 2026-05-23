@@ -23,7 +23,10 @@ impl<const MAX_LEN: usize> CappedOsString<MAX_LEN> {
         let s = s.as_ref();
         let len = s.len();
         if len > MAX_LEN {
-            return Err(OsStringTooLongError { actual_len: len, max_len: MAX_LEN});
+            return Err(OsStringTooLongError {
+                actual_len: len,
+                max_len: MAX_LEN,
+            });
         }
         Ok(Self(OsString::from(s)))
     }

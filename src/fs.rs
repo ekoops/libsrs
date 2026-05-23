@@ -1,4 +1,4 @@
-use rustix::fs::{self, AtFlags, Dir, Mode, OFlags, Stat, CWD};
+use rustix::fs::{self, AtFlags, CWD, Dir, Mode, OFlags, Stat};
 use std::ffi::CStr;
 use std::fs as std_fs;
 use std::io;
