@@ -243,7 +243,8 @@ where
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
-    for dir_entry in Dir::read_from(dir_fd.as_fd())? {
+    let mut dir = Dir::new(dir_fd)?;
+    while let Some(dir_entry) = dir.read() {
         // todo(ekoops): maybe we should continue on error...?
         let dir_entry = dir_entry?;
         let name_bytes = dir_entry.file_name().to_bytes();
@@ -251,7 +252,7 @@ where
             continue;
         }
         let dir_entry = DirEntry {
-            fd: dir_fd.as_fd(),
+            fd: dir.fd()?,
             entry: dir_entry,
         };
         process(&dir_entry)?;
